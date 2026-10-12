@@ -1,0 +1,76 @@
+{
+  "name": "ai-assets-toolkit",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Desktop image and video creation workspace",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:ui": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build && node scripts/build-electron.mjs",
+    "start": "electron .",
+    "test": "tsx --test tests/*.test.ts",
+    "package": "npm run build && electron-builder --mac dir",
+    "test:desktop": "npm run build && node scripts/run-desktop-smoke.mjs",
+    "test:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.32",
+    "fflate": "0.8.2",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "lucide-react": "^0.468.0",
+    "pdf-parse": "^1.1.1",
+    "pngjs": "^7.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/three": "0.186.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.innovation.ai-assets-toolkit",
+    "productName": "AI Assets Toolkit",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!node_modules/ffprobe-static/bin/linux/**/*",
+      "!node_modules/ffprobe-static/bin/win32/**/*",
+      "!node_modules/ffprobe-static/bin/darwin/x64/**/*",
+      "!node_modules/@mediapipe/tasks-vision/**/*"
+    ],
+    "asarUnpack": [
+      "**/ffmpeg-static/**",
+      "**/ffprobe-static/**"
+    ],
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "identity": null,
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.icns"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "npmRebuild": false
+  },
+  "author": "AI Assets Toolkit"
+}

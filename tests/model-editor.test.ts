@@ -1,0 +1,26 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Workbenches} from '../electron/workbenches';
+import {inspectFile,extension} from '../electron/assets';
+import {defaultModelEditor} from '../src/shared/types';
+const vault={secure:false,get:()=>undefined,set:()=>{}};
+test('FBX signatures validated before storing files',()=>{const bytes=readFileSync('tests/fixtures/dancing.fbx');assert.equal(inspectFile('dancing.fbx',bytes).type,'model');assert.equal(extension('application/vnd.autodesk.fbx'),'.fbx');assert.throws(()=>inspectFile('bad.fbx',Buffer.from('not FBX')),/仅支持/);assert.throws(()=>inspectFile('huge.fbx',bytes,.01),/小于/);});
+test('model state and original binary persist in the correct workbench; AI is blocked',async()=>{const dir=mkdtempSync(join(tmpdir(),'model-editor-')),manager=new Workbenches(dir,vault,()=>{});try{const entry=manager.create('motion-editor'),service=manager.get(entry.id),raw=readFileSync('tests/fixtures/dancing.fbx');const [asset]=await service.importFiles([{name:'动作.fbx',bytes:raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength) as ArrayBuffer}]);service.saveModelEditor({...defaultModelEditor(),assetId:asset.id,speed:.5,showSkeleton:true,ignoreTranslation:true});assert.deepEqual(Buffer.from(service.modelData(asset.id)),raw);await assert.rejects(()=>service.generate({kind:'video'} as any),/不接入 AI/);assert.equal(service.workspace.tasks.length,0);assert.throws(()=>service.saveModelEditor({...defaultModelEditor(),assetId:'foreign'}),/不存在/);assert.throws(()=>service.saveModelEditor({...defaultModelEditor(),speed:100}),/不合法/);const other=manager.create('motion-editor');assert.throws(()=>manager.get(other.id).modelData(asset.id),/不存在/);manager.close();const restored=new Workbenches(dir,vault,()=>{});try{assert.equal(restored.get(entry.id).workspace.modelEditor?.assetId,asset.id);assert.equal(restored.get(entry.id).workspace.modelEditor?.speed,.5);assert.equal(restored.get(entry.id).workspace.modelEditor?.ignoreTranslation,true);}finally{restored.close();}}finally{manager.close();}});
+test('old video-frame workbench upgrades in place without deleting assets or changing image-video templates',()=>{const dir=mkdtempSync(join(tmpdir(),'model-migrate-')),manager=new Workbenches(dir,vault,()=>{}),entry=manager.create('motion-editor'),original=manager.create('image-video');const path=manager.path(entry.id);manager.close();const file=join(dir,'workbenches.json'),catalog=JSON.parse(readFileSync(file,'utf8'));catalog.workbenches.find((w:any)=>w.id===entry.id).type='video-frames';catalog.workbenches.find((w:any)=>w.id===entry.id).name='视频与动画帧 1';writeFileSync(file,JSON.stringify(catalog));const upgraded=new Workbenches(dir,vault,()=>{});try{assert.equal(upgraded.info(entry.id).type,'motion-editor');assert.equal(upgraded.info(entry.id).name,'动作编辑器 1');assert.equal(upgraded.path(entry.id),path);assert.equal(upgraded.info(original.id).type,'image-video');assert.equal(upgraded.catalog().types.length,2);}finally{upgraded.close();}});
+
+test('in-place playback pins root XYZ translation while preserving limb motion and rotations',async()=>{
+ const {Group,Bone,AnimationClip,VectorKeyframeTrack,QuaternionKeyframeTrack,AnimationMixer}=await import('three');const {createInPlaceClip}=await import('../src/ui/root-motion');
+ const model=new Group(),root=new Bone(),hand=new Bone();root.name='Root';hand.name='Hand';model.add(root);root.add(hand);
+ const original=new AnimationClip('moving',1,[new VectorKeyframeTrack('Root.position',[0,1],[1,2,3,11,12,13]),new VectorKeyframeTrack('Hand.position',[0,1],[0,1,0,0,3,0]),new QuaternionKeyframeTrack('Root.quaternion',[0,1],[0,0,0,1,0,1,0,0])]);
+ const stationary=createInPlaceClip(model,original),mixer=new AnimationMixer(model);let action=mixer.clipAction(stationary).play();mixer.setTime(.5);
+ assert.deepEqual(root.position.toArray(),[1,2,3]);assert.equal(hand.position.y,2);assert.ok(Math.abs(root.quaternion.y)>.6);assert.deepEqual(Array.from(original.tracks[0].values),[1,2,3,11,12,13]);assert.equal(stationary.duration,original.duration);
+ mixer.stopAllAction();action=mixer.clipAction(original).play();mixer.setTime(.5);assert.deepEqual(root.position.toArray(),[6,7,8]);assert.equal(hand.position.y,2);mixer.stopAllAction();mixer.uncacheRoot(model);
+});
+test('in-place clips handle a translating armature and nested pelvis without freezing descendants',async()=>{
+ const {Group,Bone,AnimationClip,VectorKeyframeTrack}=await import('three');const {createInPlaceClip}=await import('../src/ui/root-motion');const model=new Group(),armature=new Group(),root=new Bone(),hips=new Bone(),foot=new Bone();armature.name='Armature';root.name='Root';hips.name='Pelvis';foot.name='Foot';model.add(armature);armature.add(root);root.add(hips);hips.add(foot);
+ const source=new AnimationClip('motion',1,['Armature','Pelvis','Foot'].map(name=>new VectorKeyframeTrack(name+'.position',[0,1],[0,1,0,5,3,4]))),clip=createInPlaceClip(model,source);
+ assert.deepEqual(Array.from(clip.tracks[0].values),[0,1,0,0,1,0]);assert.deepEqual(Array.from(clip.tracks[1].values),[0,1,0,0,1,0]);assert.deepEqual(Array.from(clip.tracks[2].values),[0,1,0,5,3,4]);
+});

@@ -1,0 +1,7 @@
+MediaPipe Tasks Vision 0.10.32 — Copyright Google LLC, Apache License 2.0.
+https://github.com/google-ai-edge/mediapipe
+https://www.npmjs.com/package/@mediapipe/tasks-vision
+Model: MediaPipe Pose Landmarker Lite, float16, version 1.
+https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+Model SHA256: recorded in design/motion-library.md.
+Documentation: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker

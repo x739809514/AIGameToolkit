@@ -1,0 +1,59 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';import {join} from 'node:path';
+import {Workbenches} from '../electron/workbenches';import {Store} from '../electron/store';
+import {emptyWorkspace,type Provider} from '../src/shared/types';
+function fixture(){const keys:Partial<Record<Provider,string>>={};const vault={secure:false,get:(p:Provider)=>keys[p],set:(p:Provider,value:string)=>{keys[p]=value;}};return {directory:mkdtempSync(join(tmpdir(),'workbenches-')),vault};}
+test('old workspace becomes an existing instance without moving media or losing drafts and tasks',()=>{
+ const {directory,vault}=fixture();const store=new Store(directory);const w=emptyWorkspace();w.drafts.image.prompt='已有创作';w.messages.push({id:'old-message',kind:'video',role:'user',text:'原来的聊天记录',createdAt:1});w.tasks.push({id:'old-task',requestId:'old-request',kind:'video',state:'queued',createdAt:1,updatedAt:1,prompt:'原来的视频任务',assetIds:[],mode:'first_frame',discussion:false,settings:{...w.settings},outputAssetIds:[],remoteTaskId:'preserved-remote-id'});store.save(w);writeFileSync(join(directory,'assets','keep.txt'),'existing asset');store.close();const manager=new Workbenches(directory,vault,()=>{});
+ try{assert.equal(manager.entries.length,1);assert.equal(manager.entries[0].id,'legacy');const restored=manager.get('legacy').workspace;assert.equal(restored.drafts.image.prompt,'已有创作');assert.deepEqual(restored.tasks,w.tasks);assert.deepEqual(restored.messages,w.messages);assert.equal(readFileSync(join(directory,'assets','keep.txt'),'utf8'),'existing asset');assert.equal(manager.path('legacy'),directory);}finally{manager.close();}
+});
+test('instances isolate drafts and assets, share credentials, and persist across manager restart',async()=>{
+ const {directory,vault}=fixture();const changed:string[]=[];let manager=new Workbenches(directory,vault,id=>changed.push(id));const a=manager.create('image-video','宣传片'),b=manager.create('image-video','角色设计');
+ try{const first=manager.get(a.id),second=manager.get(b.id);first.saveDraft('image',{prompt:'A 的草稿',attachmentIds:[],mode:'first_frame',discussion:false});second.saveDraft('image',{prompt:'B 的草稿',attachmentIds:[],mode:'first_frame',discussion:false});await first.importFiles([{name:'A.md',bytes:new TextEncoder().encode('仅 A 可见').buffer}]);assert.equal(second.workspace.assets.length,0);assert.notEqual(first.store.directory,second.store.directory);first.saveSettings(first.workspace.settings,{minimax:'test-only'});assert.equal(second.boot().credentials.minimax,true);assert.equal(first.workspace.drafts.image.prompt,'A 的草稿');assert.equal(changed.at(-1),a.id);manager.close();manager=new Workbenches(directory,vault,()=>{});assert.equal(manager.get(a.id).workspace.drafts.image.prompt,'A 的草稿');assert.equal(manager.get(b.id).workspace.drafts.image.prompt,'B 的草稿');assert.equal(manager.get(a.id).workspace.assets[0].text,'仅 A 可见');assert.equal(manager.catalog(new Set([b.id])).workbenches.find(w=>w.id===b.id)?.isOpen,true);}finally{manager.close();}
+});
+test('unknown types, oversized names and arbitrary workspace paths are rejected',()=>{
+ const {directory,vault}=fixture();const manager=new Workbenches(directory,vault,()=>{});try{assert.throws(()=>manager.create('unknown' as any),/种类/);assert.throws(()=>manager.create('image-video','a'.repeat(61)),/名称/);assert.throws(()=>manager.get('../outside'),/不存在/);assert.equal(manager.entries.length,0);}finally{manager.close();}
+});
+test('two instances can submit independent video tasks without sharing session busy state',async()=>{
+ const {directory,vault}=fixture();vault.set('minimax','test-only');const manager=new Workbenches(directory,vault,()=>{});const a=manager.create('image-video'),b=manager.create('image-video');const original=globalThis.fetch;let submissions=0;
+ globalThis.fetch=async()=>Response.json({task_id:`remote-${++submissions}`});
+ try{
+   const bytes=readFileSync('tests/fixtures/image.png');const first=manager.get(a.id),second=manager.get(b.id);const fa=await first.assets.import('a.png',bytes),fb=await second.assets.import('b.png',bytes);first.workspace.assets.push(fa);second.workspace.assets.push(fb);
+   const draft=(id:string)=>({prompt:'向前推进',attachmentIds:[],baseImageId:id,mode:'first_frame' as const,discussion:false});
+   const [ta,tb]=await Promise.all([first.generate({kind:'video',requestId:'a-task',draft:draft(fa.id)}),second.generate({kind:'video',requestId:'b-task',draft:draft(fb.id)})]);
+   for(let i=0;i<100&&(first.workspace.tasks[0].state!=='queued'||second.workspace.tasks[0].state!=='queued');i++)await new Promise(r=>setTimeout(r,10));
+   assert.equal(submissions,2);assert.notEqual(ta.id,tb.id);assert.equal(first.workspace.tasks.length,1);assert.equal(second.workspace.tasks.length,1);assert.equal(first.workspace.tasks[0].baseImageId,fa.id);assert.equal(second.workspace.tasks[0].baseImageId,fb.id);assert.notEqual(first.workspace.tasks[0].remoteTaskId,second.workspace.tasks[0].remoteTaskId);
+ }finally{globalThis.fetch=original;manager.close();}
+});
+
+test('Worktrees own directories containing multiple isolated workbenches and survive restart',async()=>{
+ const {directory,vault}=fixture();let manager=new Workbenches(directory,vault,()=>{});
+ const tree=manager.createWorktree('广告项目'),other=manager.createWorktree('角色项目');const a=manager.create('image-video','分镜',tree.id),b=manager.create('image-video','成片',tree.id),c=manager.create('image-video','角色',other.id);
+ try{const [asset]=await manager.get(a.id).importFiles([{name:'brief.md',bytes:new TextEncoder().encode('shared directory').buffer}]);const files=manager.files(tree.id);assert.equal(files.assets.size,1);assert.equal(files.folders.size,2);assert.equal([...files.assets.values()][0].id,asset.id);assert.equal(manager.get(b.id).workspace.assets.length,0);assert.notEqual(manager.treePath(tree.id),manager.treePath(other.id));assert.ok(manager.path(a.id).startsWith(manager.treePath(tree.id)+'/'));assert.ok(!manager.path(c.id).startsWith(manager.treePath(tree.id)+'/'));assert.throws(()=>manager.create('image-video','bad','../outside'),/不存在/);assert.throws(()=>manager.createWorktree('x'.repeat(61)),/名称/);manager.close();manager=new Workbenches(directory,vault,()=>{});assert.equal(manager.info(b.id).worktreeId,tree.id);assert.equal(manager.catalog().worktrees.length,2);assert.equal(manager.files(tree.id).assets.size,1);}finally{manager.close();}
+});
+test('v1 catalog migrates into a default Worktree without moving workbench directories',()=>{
+ const {directory,vault}=fixture();const id='11111111-1111-1111-1111-111111111111';writeFileSync(join(directory,'workbenches.json'),JSON.stringify({version:1,workbenches:[{id,type:'image-video',name:'旧工作台',createdAt:1,lastOpenedAt:2}]}));const manager=new Workbenches(directory,vault,()=>{});try{assert.equal(manager.info(id).worktreeId,'legacy');assert.equal(manager.path(id),join(directory,'workbenches',id));assert.equal(manager.catalog().worktrees[0].name,'默认 Worktree');assert.equal(JSON.parse(readFileSync(manager.file,'utf8')).version,2);}finally{manager.close();}
+});
+test('deleting the legacy instance moves only its data to Trash and preserves Worktree files and other instances',async()=>{
+ const {existsSync,renameSync}=await import('node:fs');const {directory,vault}=fixture();let manager=new Workbenches(directory,vault,()=>{});const a=manager.create('image-video','旧实例'),b=manager.create('image-video','保留实例');
+ writeFileSync(join(directory,'brief.md'),'Worktree 公共文件');writeFileSync(join(directory,'credentials.enc.json'),'shared credentials');const trash=join(mkdtempSync(join(tmpdir(),'instance-trash-')),'deleted');
+ try{
+  const source=manager.get(a.id);source.saveDraft('image',{prompt:'待删除的草稿',attachmentIds:[],mode:'first_frame',discussion:false});writeFileSync(join(source.assets.directory,'picture.png'),'image');manager.get(b.id).saveDraft('image',{prompt:'保留草稿',attachmentIds:[],mode:'first_frame',discussion:false});
+  const removed=await manager.deleteWorkbench(a.id,async path=>renameSync(path,trash));assert.equal(removed.id,a.id);assert.ok(existsSync(join(trash,'workspace.sqlite')));assert.ok(existsSync(join(trash,'assets','picture.png')));assert.ok(!existsSync(join(directory,'workspace.sqlite')));assert.ok(!existsSync(join(directory,'assets')));assert.equal(readFileSync(join(directory,'brief.md'),'utf8'),'Worktree 公共文件');assert.equal(readFileSync(join(directory,'credentials.enc.json'),'utf8'),'shared credentials');assert.equal(manager.get(b.id).workspace.drafts.image.prompt,'保留草稿');assert.throws(()=>manager.get(a.id),/不存在/);
+  manager.close();manager=new Workbenches(directory,vault,()=>{});assert.equal(manager.entries.length,1);assert.equal(manager.entries[0].id,b.id);assert.equal(manager.worktrees.length,1);
+ }finally{manager.close();}
+});
+test('deleting an instance closes its service and moves its dedicated directory without removing its Worktree',async()=>{
+ const {existsSync,renameSync}=await import('node:fs');const {directory,vault}=fixture();const manager=new Workbenches(directory,vault,()=>{}),tree=manager.createWorktree('项目'),a=manager.create('image-video','独立实例',tree.id);const original=manager.path(a.id),service=manager.get(a.id);const trash=join(mkdtempSync(join(tmpdir(),'instance-trash-')),'deleted');
+ try{service.saveDraft('image',{prompt:'草稿',attachmentIds:[],mode:'first_frame',discussion:false});await manager.deleteWorkbench(a.id,async path=>renameSync(path,trash));assert.ok(!existsSync(original));assert.ok(existsSync(join(trash,'workbench','workspace.sqlite')));assert.ok(existsSync(manager.treePath(tree.id)));assert.equal(service.closed,true);assert.equal(manager.entries.length,0);assert.equal(manager.worktrees.length,1);}finally{manager.close();}
+});
+test('instance deletion blocks active, uncertain and local operations before touching files',async()=>{
+ const {directory,vault}=fixture();const manager=new Workbenches(directory,vault,()=>{}),a=manager.create('image-video');const service=manager.get(a.id);let trashCalls=0;
+ try{for(const state of ['preparing','submitting','running','queued','saving','submission_unknown'] as const){service.workspace.tasks=[{id:'active',requestId:'request',kind:'image',state,createdAt:0,updatedAt:0,prompt:'pending',assetIds:[],mode:'first_frame',discussion:false,settings:{...service.workspace.settings},outputAssetIds:[]}];await assert.rejects(()=>manager.deleteWorkbench(a.id,async()=>{trashCalls++;}),/正在运行/);}service.workspace.tasks=[];service.localOperations=1;await assert.rejects(()=>manager.deleteWorkbench(a.id,async()=>{trashCalls++;}),/正在运行/);service.localOperations=0;assert.equal(trashCalls,0);assert.equal(manager.entries.length,1);assert.equal(service.closed,false);await assert.rejects(()=>manager.deleteWorkbench('../outside',async()=>{}),/不存在/);}finally{manager.close();}
+});
+test('Trash failure restores the directory and catalog, including saved drafts',async()=>{
+ const {existsSync}=await import('node:fs');const {directory,vault}=fixture();const manager=new Workbenches(directory,vault,()=>{}),tree=manager.createWorktree(),a=manager.create('image-video','恢复实例',tree.id);manager.get(a.id).saveDraft('image',{prompt:'失败后保留',attachmentIds:[],mode:'first_frame',discussion:false});const original=manager.path(a.id);
+ try{await assert.rejects(()=>manager.deleteWorkbench(a.id,async()=>{throw new Error('Trash unavailable');}),/Trash unavailable/);assert.ok(existsSync(join(original,'workspace.sqlite')));assert.equal(manager.info(a.id).name,'恢复实例');assert.equal(manager.get(a.id).workspace.drafts.image.prompt,'失败后保留');assert.ok(JSON.parse(readFileSync(manager.file,'utf8')).workbenches.some((e:any)=>e.id===a.id));assert.equal(manager.deleting.size,0);}finally{manager.close();}
+});

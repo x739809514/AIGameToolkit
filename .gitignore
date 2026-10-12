@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.local-data/
+.env*
+*.log
+.DS_Store
+
+# Generated review artifacts and legacy pose runtime
+output/
+public/pose/worker.js
+public/pose/wasm/
+public/pose/*.task
+
+# Local databases and encrypted credentials
+*.sqlite
+*.sqlite-*
+credentials.enc.json

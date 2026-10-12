@@ -1,0 +1,10 @@
+import {FilesetResolver,PoseLandmarker} from '@mediapipe/tasks-vision';
+import {poseBones,emptyJoints,type PoseJoint} from '../shared/pose';
+let detector:PoseLandmarker|undefined;
+const ctx=self as unknown as {onmessage:((event:MessageEvent)=>void)|null;postMessage:(message:unknown)=>void;location:Location};
+ctx.onmessage=async event=>{const {id,kind,bitmap,timestamp}=event.data;try{
+ if(kind==='init'){const base=new URL('./',ctx.location.href);detector=await PoseLandmarker.createFromOptions(await FilesetResolver.forVisionTasks(new URL('wasm',base).href),{baseOptions:{modelAssetPath:new URL('pose_landmarker_lite.task',base).href,delegate:'CPU'},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5,canvas:new OffscreenCanvas(1,1)});ctx.postMessage({id,ready:true});return;}
+ if(kind==='detect'){if(!detector)throw new Error('姿态模型未初始化。');const result=detector.detectForVideo(bitmap,timestamp);bitmap.close();const landmarks=result.landmarks[0],joints=emptyJoints();
+ if(landmarks){const point=(i:number)=>landmarks[i],middle=(a:number,b:number)=>({x:(point(a).x+point(b).x)/2,y:(point(a).y+point(b).y)/2,visibility:Math.min(point(a).visibility,point(b).visibility)}),hip=middle(23,24),shoulder=middle(11,12),face=middle(7,8);const mapping:Record<string,typeof hip>={pelvis:hip,chest:{x:shoulder.x*.85+hip.x*.15,y:shoulder.y*.85+hip.y*.15,visibility:Math.min(hip.visibility,shoulder.visibility)},neck:shoulder,head:face,left_shoulder:point(11),left_elbow:point(13),left_wrist:point(15),right_shoulder:point(12),right_elbow:point(14),right_wrist:point(16),left_hip:point(23),left_knee:point(25),left_ankle:point(27),left_toe:point(31),right_hip:point(24),right_knee:point(26),right_ankle:point(28),right_toe:point(32)};for(const j of joints){const p=mapping[j.id],c=p.visibility||0;if(Number.isFinite(p.x)&&Number.isFinite(p.y)&&p.x>=0&&p.x<=1&&p.y>=0&&p.y<=1&&c>=.2)Object.assign(j,{x:p.x,y:p.y,confidence:Math.min(1,c),visible:c>=.5});}}
+ ctx.postMessage({id,joints});return;}
+ }catch(e){bitmap?.close();ctx.postMessage({id,error:e instanceof Error?e.message:'姿态提取失败'});}};
