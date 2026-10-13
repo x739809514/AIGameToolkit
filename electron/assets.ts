@@ -26,40 +26,48 @@ export function inspectFile(name:string,b:Buffer,maxMB=50){
   return {mime,type};
 }
 export class Assets {
+  private lifecycle=new AbortController();
+  close(){this.lifecycle.abort();}
+  private assertOpen(){if(this.lifecycle.signal.aborted)throw new Error('工作台已关闭，素材处理已取消。');}
+  private async exec(file:string,args:string[],options:{timeout:number;maxBuffer:number}){this.assertOpen();const result=await exec(file,args,{...options,signal:this.lifecycle.signal,killSignal:'SIGKILL'});this.assertOpen();return result;}
   normalizations=new Map<string,Promise<Buffer>>();
   constructor(public directory:string){}
   path(a:Asset){return join(this.directory,a.id+extension(a.mime));}
   framePath(id:string,index:number){return join(this.directory,`${id}-frame-${index}.jpg`);}
-  bytes(a:Asset){return readFileSync(this.path(a));}
+  bytes(a:Asset){this.assertOpen();return readFileSync(this.path(a));}
   dataUrl(a:Asset){return `data:${a.mime};base64,${this.bytes(a).toString('base64')}`;}
   async h3DataUrl(a:Asset){
+    this.assertOpen();
     if(a.mime!=='video/quicktime')return this.dataUrl(a);
     const target=join(this.directory,`${a.id}-transport.mp4`);
-    await exec(executable(ffmpeg!),['-y','-i',this.path(a),'-c','copy','-movflags','+faststart',target],{timeout:30000,maxBuffer:1024*1024});
+    await this.exec(executable(ffmpeg!),['-y','-i',this.path(a),'-c','copy','-movflags','+faststart',target],{timeout:30000,maxBuffer:1024*1024});
     return `data:video/mp4;base64,${readFileSync(target).toString('base64')}`;
   }
 
   async normalizedPNG(a:Asset){
+    this.assertOpen();
     if(a.type!=='image')throw new Error('请选择图片素材。');
     if(a.mime==='image/png'){const bytes=this.bytes(a);readPNG(bytes);return bytes;}
     const pending=this.normalizations.get(a.id);if(pending)return pending;
     const work=(async()=>{const target=join(this.directory,`${a.id}-normalized.png`);
-      await exec(executable(ffmpeg!),['-y','-i',this.path(a),'-frames:v','1','-pix_fmt','rgba',target],{timeout:30000,maxBuffer:1024*1024});
+      await this.exec(executable(ffmpeg!),['-y','-i',this.path(a),'-frames:v','1','-pix_fmt','rgba',target],{timeout:30000,maxBuffer:1024*1024});
       const bytes=readFileSync(target);readPNG(bytes);return bytes;
     })();this.normalizations.set(a.id,work);try{return await work;}finally{this.normalizations.delete(a.id);}
   }
 
   async resizePNG(bytes:Buffer,width:number,height:number,id:string){
+    this.assertOpen();
     const image=readPNG(bytes);if(image.width===width&&image.height===height)return bytes;
     const source=join(this.directory,`${id}-result.png`),target=join(this.directory,`${id}-resized.png`);writeFileSync(source,bytes);
-    await exec(executable(ffmpeg!),['-y','-i',source,'-vf',`scale=${width}:${height}:flags=lanczos`,'-frames:v','1','-pix_fmt','rgba',target],{timeout:30000,maxBuffer:1024*1024});return readFileSync(target);
+    await this.exec(executable(ffmpeg!),['-y','-i',source,'-vf',`scale=${width}:${height}:flags=lanczos`,'-frames:v','1','-pix_fmt','rgba',target],{timeout:30000,maxBuffer:1024*1024});return readFileSync(target);
   }
   async extractFrames(video:Asset,count:number,sequenceId:string):Promise<Asset[]>{
+    this.assertOpen();
     validateFrameCount(count);
     if(video.type!=='video')throw new Error('请选择视频素材进行拆帧。');
     // Container duration can include longer audio or rounded fractions. Seek to
     // decoded frame timestamps instead of estimating the last frame from FPS.
-    const {stdout}=await exec(executable(ffprobe.path),['-v','error','-select_streams','v:0','-show_frames','-show_entries','frame=best_effort_timestamp_time:format=start_time','-of','json',this.path(video)],{timeout:60000,maxBuffer:32*1024*1024});
+    const {stdout}=await this.exec(executable(ffprobe.path),['-v','error','-select_streams','v:0','-show_frames','-show_entries','frame=best_effort_timestamp_time:format=start_time','-of','json',this.path(video)],{timeout:60000,maxBuffer:32*1024*1024});
     const metadata=JSON.parse(stdout),start=Number(metadata.format?.start_time)||0;
     const times:number[]=metadata.frames.map((frame:{best_effort_timestamp_time?:string})=>Number(frame.best_effort_timestamp_time)).filter((time:number)=>Number.isFinite(time)).map((time:number)=>Math.max(0,time-start)).sort((a:number,b:number)=>a-b);
     if(!times.length)throw new Error('视频中没有可解码的动画帧，请检查视频文件。');
@@ -68,7 +76,7 @@ export class Assets {
     const first=times[0],last=times[times.length-1];
     const samples=Array.from({length:count},(_,index)=>{const target=count===1?first:first+(last-first)*index/(count-1);let low=0,high=times.length-1;while(low<high){const mid=Math.floor((low+high)/2);if(times[mid]<target)low=mid+1;else high=mid;}return low>0&&target-times[low-1]<times[low]-target?times[low-1]:times[low];});
     const worker=async()=>{while(next<count){const index=next++,time=samples[index],id=randomUUID(),file=join(temporary,`${index}.png`);
-      await exec(executable(ffmpeg!),['-y','-ss',String(Math.max(0,time-.00001)),'-i',this.path(video),'-map','0:v:0','-frames:v','1','-pix_fmt','rgba',file],{timeout:60000,maxBuffer:1024*1024});
+      await this.exec(executable(ffmpeg!),['-y','-ss',String(Math.max(0,time-.00001)),'-i',this.path(video),'-map','0:v:0','-frames:v','1','-pix_fmt','rgba',file],{timeout:60000,maxBuffer:1024*1024});
       const bytes=readFileSync(file),png=readPNG(bytes);result[index]={id,name:`${video.name.replace(/\.[^.]+$/,'')}-帧${String(index+1).padStart(3,'0')}.png`,type:'image',mime:'image/png',size:bytes.length,url:`asset://local/${id}`,createdAt:Date.now(),sourceTaskId:video.sourceTaskId,sourceAssetId:video.id,width:png.width,height:png.height,frame:{videoId:video.id,sequenceId,index,time}};
     }};
     try{const settled=await Promise.allSettled(Array.from({length:Math.min(3,count)},()=>worker()));const failure=settled.find(r=>r.status==='rejected');if(failure?.status==='rejected')throw failure.reason;
@@ -77,6 +85,7 @@ export class Assets {
   }
 
   async import(name:string,bytes:Buffer,sourceTaskId?:string,maxMB=sourceTaskId?200:50):Promise<Asset>{
+    this.assertOpen();
     const {mime,type}=inspectFile(name,bytes,maxMB);const id=randomUUID();
     const a:Asset={id,name:basename(name).slice(0,180),mime,type,size:bytes.length,url:`asset://local/${id}`,createdAt:Date.now(),sourceTaskId};
     const path=this.path(a);writeFileSync(path+'.tmp',bytes);renameSync(path+'.tmp',path);
@@ -89,7 +98,7 @@ export class Assets {
       return a;
     }
     try{
-      const {stdout}=await exec(executable(ffprobe.path),['-v','quiet','-print_format','json','-show_streams','-show_format',path],{timeout:20000,maxBuffer:1024*1024});
+      const {stdout}=await this.exec(executable(ffprobe.path),['-v','quiet','-print_format','json','-show_streams','-show_format',path],{timeout:20000,maxBuffer:1024*1024});
       const meta=JSON.parse(stdout);const v=meta.streams.find((s:any)=>s.codec_type==='video');
       if(!v)throw new Error('没有可解码的视频或图片');a.width=v.width;a.height=v.height;
       if(type==='video'){
@@ -97,7 +106,7 @@ export class Assets {
         const [n,d]=String(v.avg_frame_rate||'0/1').split('/').map(Number);a.fps=n/d;
         a.frameUrls=[];
         for(let i=0;i<3;i++){
-          await exec(executable(ffmpeg!),['-y','-ss',String((a.duration||1)*(i+0.5)/3),'-i',path,'-frames:v','1','-vf','scale=768:-2',this.framePath(id,i)],{timeout:30000,maxBuffer:1024*1024});
+          await this.exec(executable(ffmpeg!),['-y','-ss',String((a.duration||1)*(i+0.5)/3),'-i',path,'-frames:v','1','-vf','scale=768:-2',this.framePath(id,i)],{timeout:30000,maxBuffer:1024*1024});
           a.frameUrls.push(`asset://local/${id}/frame/${i}`);
         }
       }

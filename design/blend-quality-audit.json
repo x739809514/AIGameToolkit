@@ -1,0 +1,27 @@
+{
+  "sources": [
+    {
+      "name": "Gunplay",
+      "duration": 0.20000000298023224
+    },
+    {
+      "name": "Walk With Rifle",
+      "duration": 3.366666555404663
+    }
+  ],
+  "cause": "forced normalization to common cycle",
+  "oldUpperBodySpeed": 0.059405943442531646,
+  "first200msRightArmAngularTravelDegrees": {
+    "source": 22.624358059479764,
+    "beforeActualBlend": 0.6842465158646034,
+    "afterActualBlend": 22.62435805947975
+  },
+  "overlap": {
+    "bone": "Hips",
+    "overriddenBy": "Walk With Rifle",
+    "weight": 1
+  },
+  "sourceFilesReadOnly": true,
+  "testsPassed": 112,
+  "packagedBlendCheckPassed": true
+}

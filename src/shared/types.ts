@@ -1,12 +1,16 @@
+import type {APIBalance} from './api-balance';
+import {defaultMotionBlend,type MotionBlendTree} from './motion-blend';
+import type {MotionTimelineItem} from './motion-timeline';
+import type {TerminalWorkspace,TerminalPane,TerminalEvent,TerminalView} from './terminal';
 import type {ModelVideoInput} from './model-video';
 import type {PoseWorkspace,PoseAnalysis,MotionWorkspace,MotionExtractInput,MotionExtraction,MotionFrame,MotionClip,MotionPart,PoseJoint,SavedPose} from './pose';
 export type Provider = 'openai' | 'anthropic' | 'minimax';
 export type Kind = 'image' | 'video';
-export type WorkbenchType = 'image-video'|'video-frames'|'motion-editor';
-export const workbenchTypes=[{id:'image-video' as WorkbenchType,name:'图片与视频创作',description:'从图片构思、生成与修改，到 MiniMax 视频创作。',features:['图片生成与编辑','图片转视频','素材上传与预览']},{id:'motion-editor' as WorkbenchType,name:'动作编辑器',description:'将 FBX 动作应用到内置基础人形，观察、播放并导出相机视频。无需 API。',features:['内置基础人形','FBX 动作映射','相机视频导出']}];
-export interface WorktreeInfo {id:string;name:string;createdAt:number}
-export interface WorkbenchInfo {id:string;worktreeId:string;type:WorkbenchType;name:string;createdAt:number;lastOpenedAt:number;isOpen?:boolean}
-export interface WorkbenchCatalog {types:typeof workbenchTypes;worktrees:WorktreeInfo[];workbenches:WorkbenchInfo[]}
+export type WorkbenchType = 'image-video'|'video-frames'|'motion-editor'|'terminal';
+export const workbenchTypes=[{id:'image-video' as WorkbenchType,name:'图片与视频创作',description:'从图片构思、生成与修改，到 MiniMax 视频创作。',features:['图片生成与编辑','图片转视频','素材上传与预览']},{id:'motion-editor' as WorkbenchType,name:'动作编辑器',description:'将 FBX 动作应用到内置基础人形，拖入时间轴混合多个动作，并导出相机视频。无需 API。',features:['Y Bot 动作映射','时间轴与动作混合','相机视频导出']},{id:'terminal' as WorkbenchType,name:'终端',description:'在 Worktree 中使用 macOS zsh，拆分独立终端，或以聊天视图查看命令与输出。',features:['原生 zsh 会话','向右拆分终端','Terminal / Chat View']}];
+export interface WorktreeInfo {id:string;name:string;createdAt:number;projectFolder?:string}
+export interface WorkbenchInfo {storage?:'app';id:string;worktreeId:string;type:WorkbenchType;name:string;createdAt:number;lastOpenedAt:number;isOpen?:boolean}
+export interface WorkbenchCatalog {types:typeof workbenchTypes;worktrees:WorktreeInfo[];workbenches:WorkbenchInfo[];projectsDirectory?:string}
 export type MiniMaxRegion = 'cn'|'global';
 export const minimaxAPIs={cn:{label:'中国区',baseURL:'https://api.minimax.cn'},global:{label:'海外区',baseURL:'https://api.minimax.io'}} as const;
 export function minimaxAPI(region:MiniMaxRegion='global'){if(!Object.hasOwn(minimaxAPIs,region))throw new Error('MiniMax API 地区不支持。');return minimaxAPIs[region];}
@@ -23,7 +27,7 @@ export interface Settings {
   videoDuration: number; videoResolution: string; minimaxRegion:MiniMaxRegion;
 }
 export const defaults: Settings = {openaiModel:'gpt-6.1-sol',openaiReasoningEffort:'medium',openaiReasoningMode:'standard',imageModel:'gpt-image-2.5-sunburst',claudeModel:'claude-sonnet-4-5',videoModel:'MiniMax-H3',chatProvider:'openai',optimize:false,imageSize:'1024x1024',imageQuality:'medium',videoDuration:5,videoResolution:'768P',minimaxRegion:'cn'};
-export interface Asset {id:string;name:string;type:'image'|'video'|'document'|'model';mime:string;size:number;url:string;createdAt:number;sourceTaskId?:string;sourceAssetId?:string;frame?:{videoId:string;sequenceId:string;index:number;time:number};imageAction?:'crop'|'edit'|'inpaint'|'remove_background';width?:number;height?:number;duration?:number;fps?:number;videoCodec?:string;audioCodec?:string;frameUrls?:string[];text?:string;warning?:string}
+export interface Asset {projectFile?:{path:string;size:number;modifiedAt:number};motionBlend?:MotionBlendTree;motionTimeline?:MotionTimelineItem[];id:string;name:string;type:'image'|'video'|'document'|'model';mime:string;size:number;url:string;createdAt:number;sourceTaskId?:string;sourceAssetId?:string;frame?:{videoId:string;sequenceId:string;index:number;time:number};imageAction?:'crop'|'edit'|'inpaint'|'remove_background';width?:number;height?:number;duration?:number;fps?:number;videoCodec?:string;audioCodec?:string;frameUrls?:string[];text?:string;warning?:string}
 export interface Draft {prompt:string;attachmentIds:string[];mode:'first_frame'|'reference'|'first_last'|'text';lastImageId?:string;baseImageId?:string;editImageId?:string;discussion:boolean}
 export interface Message {id:string;kind:Kind;role:'user'|'assistant';text:string;createdAt:number;taskId?:string;assetIds?:string[]}
 export interface Task {id:string;requestId:string;kind:Kind;state:TaskState;createdAt:number;updatedAt:number;prompt:string;effectivePrompt?:string;assetIds:string[];baseImageId?:string;editImageId?:string;mode:Draft['mode'];lastImageId?:string;autoFrameCount?:number;discussion:boolean;settings:Settings;previewAtSubmit?:string;remoteTaskId?:string;resultUrl?:string;outputAssetIds:string[];error?:string;pollError?:string;legacySample?:boolean;imageEdit?:{sourceAssetId:string;operation:'edit'|'inpaint'|'remove_background';maskFile?:string}}
@@ -32,10 +36,11 @@ export interface FrameSequence {id:string;requestId:string;videoId:string;count:
 export interface FrameWorkspace {mode:'normal'|'split';frameCount:number;sequences:FrameSequence[];selectedSequenceId?:string;selectedFrameIndex?:number}
 export const defaultFrameWorkspace=():FrameWorkspace=>({mode:'normal',frameCount:20,sequences:[]});
 export function validateFrameCount(count:number){if(!Number.isInteger(count)||count<1||count>240)throw new Error('拆帧数量须为 1–240 之间的整数。');}
-export interface ModelEditorState {assetId?:string;clipIndex:number;speed:number;loop:boolean;showSkeleton:boolean;showGrid:boolean;ignoreTranslation:boolean}
-export const defaultModelEditor=():ModelEditorState=>({clipIndex:0,speed:1,loop:true,showSkeleton:false,showGrid:true,ignoreTranslation:false});
-export interface Workspace {modelEditor?:ModelEditorState;version:1;workbenchType?:WorkbenchType;frameWorkspace?:FrameWorkspace;poseWorkspace?:PoseWorkspace;motionWorkspace?:MotionWorkspace;imageModelDefaultVersion?:1;chatModelDefaultVersion?:1;settings:Settings;assets:Asset[];messages:Message[];tasks:Task[];drafts:Record<Kind,Draft>;selectedImageId?:string;selectedVideoId?:string}
-export interface Boot {workspace:Workspace;credentials:Record<Provider,boolean>;secureStorage:boolean;dataDirectory:string;desktop:boolean;workbench?:WorkbenchInfo;worktree?:WorktreeInfo}
+export interface ModelEditorState {blendTree?:MotionBlendTree;timelineItems:MotionTimelineItem[];timelineEnabled:boolean;assetId?:string;clipIndex:number;speed:number;loop:boolean;showSkeleton:boolean;showGrid:boolean;ignoreTranslation:boolean}
+export const defaultModelEditor=():ModelEditorState=>({timelineItems:[],timelineEnabled:false,clipIndex:0,speed:1,loop:true,showSkeleton:false,showGrid:true,ignoreTranslation:false});
+export interface Workspace {terminalWorkspace?:TerminalWorkspace;modelEditor?:ModelEditorState;version:1;workbenchType?:WorkbenchType;frameWorkspace?:FrameWorkspace;poseWorkspace?:PoseWorkspace;motionWorkspace?:MotionWorkspace;imageModelDefaultVersion?:1;chatModelDefaultVersion?:1;settings:Settings;assets:Asset[];messages:Message[];tasks:Task[];drafts:Record<Kind,Draft>;selectedImageId?:string;selectedVideoId?:string}
+export type CredentialKeys=Partial<Record<Provider,string>>&{minimaxCredits?:string};
+export interface Boot {minimaxCreditsConfigured?:boolean;workspace:Workspace;credentials:Record<Provider,boolean>;secureStorage:boolean;dataDirectory:string;desktop:boolean;workbench?:WorkbenchInfo;worktree?:WorktreeInfo}
 export interface ImportFile {name:string;bytes:ArrayBuffer}
 export interface GenerateInput {kind:Kind;requestId:string;draft:Draft}
 export type ImageTool='edit'|'brush'|'crop'|'remove_background';
@@ -45,13 +50,16 @@ export interface WorkspaceFile {name:string;path:string;kind:'directory'|'file'|
 export interface WorkspaceFileTree {files:WorkspaceFile[];truncated:boolean}
 export interface WorkspaceFilePreview {size:number;binary:boolean;text?:string;truncated:boolean}
 export interface Api {
+  terminalSessions():Promise<TerminalPane[]>;createTerminal(afterId?:string):Promise<TerminalPane>;closeTerminal(id:string):Promise<void>;writeTerminal(id:string,data:string):Promise<void>;submitTerminal(id:string,text:string):Promise<void>;cancelCodex(id:string):Promise<void>;resizeTerminal(id:string,cols:number,rows:number):Promise<void>;setTerminalView(id:string,view:TerminalView):Promise<void>;onTerminalEvent(fn:(event:TerminalEvent)=>void):()=>void;
+
   beginModelVideo(input:ModelVideoInput):Promise<{id:string;count:number}>;appendModelVideoFrame(id:string,index:number,bytes:ArrayBuffer):Promise<void>;finishModelVideo(id:string):Promise<Asset>;cancelModelVideo(id:string):Promise<void>;
-  baseModelData():Promise<ArrayBuffer>;modelData(id:string):Promise<ArrayBuffer>;saveModelEditor(state:ModelEditorState):Promise<void>;
+  baseModelData():Promise<ArrayBuffer>;modelData(id:string):Promise<ArrayBuffer>;saveModelEditor(state:ModelEditorState):Promise<void>;saveModelBlend(input:{tree:MotionBlendTree;name:string;bytes:ArrayBuffer}):Promise<Asset>;saveModelSegment(input:{item:MotionTimelineItem;name:string;clipName:string}):Promise<Asset>;renameModel(id:string,name:string):Promise<void>;deleteModel(id:string):Promise<void>;
   forWorkbench(id:string):Api;currentWorkbench():Promise<string|undefined>;onWorkbenchSelected(fn:(id:string|undefined)=>void):()=>void;
-  workspaceFiles():Promise<WorkspaceFileTree>;readWorkspaceFile(path:string):Promise<WorkspaceFilePreview>;revealWorkspaceFile(path:string):Promise<void>;useWorktreeFile(path:string):Promise<Asset>;onWorktreeFilesChanged(fn:()=>void):()=>void;
-  catalog():Promise<WorkbenchCatalog>;createWorktree(input:{name?:string}):Promise<WorktreeInfo>;createWorkbench(input:{type:WorkbenchType;name?:string;worktreeId?:string}):Promise<WorkbenchInfo>;openWorkbench(id:string):Promise<void>;deleteWorkbench(id:string):Promise<void>;showWorkbenchLauncher():Promise<void>;subscribeCatalog(fn:(catalog:WorkbenchCatalog)=>void):()=>void;
-  boot():Promise<Boot>;saveSettings(settings:Settings,keys:Partial<Record<Provider,string>>):Promise<Boot>;
-  testConnection(provider:Provider):Promise<string>;saveDraft(kind:Kind,draft:Draft):Promise<void>;
+  createWorkspaceEntry(input:{parent:string;name:string;kind:'file'|'directory'}):Promise<string>;moveWorkspaceEntry(input:{path:string;parent:string;name?:string}):Promise<string>;trashWorkspaceEntry(path:string):Promise<void>;workspaceFiles():Promise<WorkspaceFileTree>;readWorkspaceFile(path:string):Promise<WorkspaceFilePreview>;revealWorkspaceFile(path:string):Promise<void>;useWorktreeFile(path:string,worktreeId?:string):Promise<Asset>;onWorktreeFilesChanged(fn:()=>void):()=>void;
+  catalog():Promise<WorkbenchCatalog>;createWorktree(input:{name?:string}):Promise<WorktreeInfo>;createWorkbench(input:{type:WorkbenchType;name?:string;worktreeId?:string}):Promise<WorkbenchInfo>;openWorkbench(id:string):Promise<void>;deleteWorkbench(id:string):Promise<void>;deleteWorktree(id:string,force?:boolean):Promise<void>;showWorkbenchLauncher():Promise<void>;subscribeCatalog(fn:(catalog:WorkbenchCatalog)=>void):()=>void;
+  boot():Promise<Boot>;saveSettings(settings:Settings,keys:CredentialKeys):Promise<Boot>;
+  openMiniMaxCredits():Promise<void>;onBalancesChanged(fn:()=>void):()=>void;
+  apiBalances(force?:boolean):Promise<APIBalance[]>;openAPIBilling(provider:Provider):Promise<void>;testConnection(provider:Provider):Promise<string>;saveDraft(kind:Kind,draft:Draft):Promise<void>;
   importFiles(files:ImportFile[]):Promise<Asset[]>;pickFiles():Promise<Asset[]>;
   onEditorTool(fn:(tool:ImageTool)=>void):()=>void;openImageEditor(assetId:string,tool:ImageTool):Promise<void>;imageData(assetId:string):Promise<string>;editImage(input:ImageEditInput):Promise<Task>;cropImage(input:CropInput):Promise<Asset>;
   editPose(assetId:string,joints:PoseJoint[]):Promise<void>;savePoseSnapshot(name:string):Promise<SavedPose>;loadPoseSnapshot(id:string):Promise<void>;resetPose():Promise<void>;

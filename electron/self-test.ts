@@ -24,9 +24,9 @@ export async function selfTest(window:BrowserWindow,service:Service,openEditor:(
     const imports=await service.importFiles(['image.png','video.mp4'].map(name=>{const bytes=readFileSync(join(fixtures,name));return {name,bytes:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer};}));
     service.select('image',imports[0].id);service.select('video',imports[1].id);
     for(let i=0;i<200;i++){if(await window.webContents.executeJavaScript("document.querySelector('.preview-stage video')?.readyState>=1"))break;await wait(100);}
-    window.show();window.focus();await wait(300);await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').play().catch(e=>window.__playError=e.message);true");
+    window.show();window.focus();await wait(300);await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').play().catch(e=>window.__playError=e.message);true",true);
     for(let i=0;i<100;i++){if(await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').currentTime>.4"))break;await wait(100);}
-    if(!await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').currentTime>.4"))throw new Error('视频无法播放');
+    if(!await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').currentTime>.4"))throw new Error('视频无法播放：'+JSON.stringify(await window.webContents.executeJavaScript("(()=>{const v=document.querySelector('.preview-stage video');return {paused:v.paused,time:v.currentTime,ready:v.readyState,error:v.error?.message,playError:window.__playError,hidden:document.hidden};})()")));
     await window.webContents.executeJavaScript("document.querySelector('.preview-stage video').pause()");
     writeFileSync(join(output,'packaged-desktop.png'),(await window.webContents.capturePage()).toPNG());
     const editor=openEditor(imports[0].id,'crop');

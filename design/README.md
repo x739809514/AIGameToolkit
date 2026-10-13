@@ -20,3 +20,7 @@
 - [动作编辑与动作库](./motion-library.md)：本地视频骨骼提取、逐帧编辑、清理、保存、组合、角色适配和视频参考。
 
 最新第二种模板方案：[本地 3D 动作编辑器](animation-editor.md)，替代旧视频与动画帧 UI。
+
+- [终端工作台](terminal.md)：真实 macOS zsh、独立分屏和同一会话的 Chat View。
+
+- [2D 混合树与骨骼遮罩](motion-blend.md)：分层与 XY 混合、逐关节遮罩、独立预览和视频导出。

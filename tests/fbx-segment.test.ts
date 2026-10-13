@@ -1,0 +1,12 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync,mkdtempSync,existsSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createHash} from 'node:crypto';
+import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
+import {Workbenches} from '../electron/workbenches';
+import {saveFBXSegment,motionName} from '../electron/fbx-segment';
+const bytes=(b:Buffer)=>Uint8Array.from(b).buffer;
+test('export names reject paths and keep a single FBX suffix',()=>{assert.equal(motionName('跑步.fbx'),'跑步');for(const name of ['', '../escape','a/b','a\\b','x\ny'])assert.throws(()=>motionName(name));});
+test('cropped FBX is independently playable and retains untouched source bytes',{skip:!existsSync('/Applications/Blender.app/Contents/MacOS/Blender'),timeout:180000},async()=>{const manager=new Workbenches(mkdtempSync(join(tmpdir(),'fbx-segment-')),{secure:false,get:()=>undefined,set:()=>{}},()=>{}),entry=manager.create('motion-editor'),service=manager.get(entry.id),raw=readFileSync('tests/fixtures/dancing.fbx'),hash=createHash('sha256').update(raw).digest('hex');try{const [asset]=await service.importFiles([{name:'dance.fbx',bytes:bytes(raw)}]);const exported=await saveFBXSegment(service,{name:'裁剪动作',clipName:'mixamo.com',item:{id:'segment',assetId:asset.id,clipIndex:0,label:'pose',sourceDuration:18.2,in:.5,out:1.5,rate:2,blendIn:0}});assert.notEqual(exported.id,asset.id);assert.equal(exported.name,'裁剪动作.fbx');assert.equal(exported.sourceAssetId,asset.id);assert.equal(createHash('sha256').update(Buffer.from(service.modelData(asset.id))).digest('hex'),hash);const model=new FBXLoader().parse(service.modelData(exported.id),'');assert.equal(model.animations.length,1);assert.ok(Math.abs(model.animations[0].duration-.5)<.002);assert.ok(model.animations[0].tracks.some(track=>track.name.endsWith('.quaternion')));assert.equal(service.workspace.assets.filter(a=>a.type==='model').length,2);assert.equal(service.localOperations,0);const other=manager.create('motion-editor');await assert.rejects(()=>saveFBXSegment(manager.get(other.id),{name:'other',clipName:'mixamo.com',item:{id:'x',assetId:asset.id,clipIndex:0,label:'x',sourceDuration:18.2,in:0,out:1,rate:1,blendIn:0}}));}finally{manager.close();}});

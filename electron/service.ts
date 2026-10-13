@@ -1,3 +1,8 @@
+import {CompletionTracker,type TaskCompletion} from './task-notifications';
+import {apiBalanceReader} from './api-balance';
+import {motionName} from './fbx-segment';
+import {normalizeMotionBlend,defaultMotionBlend,type MotionBlendTree} from '../src/shared/motion-blend';
+import {normalizeMotionTimeline} from '../src/shared/motion-timeline';
 import {ModelVideoExporter} from './model-video-export';
 import {Motions} from './motions';
 import {analyzePose as requestPose} from './pose';
@@ -7,36 +12,63 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cropPNG, validateMask, readPNG, compositeSelection, hasTransparency } from './image-processing';
 import { randomUUID } from 'node:crypto';
-import type { Asset, Boot, Draft, GenerateInput, ImportFile, Kind, Provider, Settings, Task, Workspace, FrameSequence, ImageEditInput, CropInput, ModelEditorState } from '../src/shared/types';
+import type { Asset, Boot, CredentialKeys, Draft, GenerateInput, ImportFile, Kind, Provider, Settings, Task, Workspace, FrameSequence, ImageEditInput, CropInput, ModelEditorState } from '../src/shared/types';
 import { isBusy, defaultFrameWorkspace, validateFrameCount, validateReasoningSettings, deletableGeneratedImage, removeGeneratedImage, minimaxAPI } from '../src/shared/types';
 import {fetchHTTP} from './network';
 import { Store } from './store';
 import { Assets } from './assets';
 import * as provider from './providers';
-export interface Vault {get(p:Provider):string|undefined;set(p:Provider,value:string):void;secure:boolean}
+export interface Vault {getMiniMaxCreditsKey?:()=>string|undefined;setMiniMaxCreditsKey?:(value:string)=>void;get(p:Provider):string|undefined;set(p:Provider,value:string):void;secure:boolean}
 export class Service {
-  workspace:Workspace;assets:Assets;modelVideo=new ModelVideoExporter(this);motions=new Motions(this);timers=new Map<string,ReturnType<typeof setTimeout>>();polling=new Set<string>();saving=new Set<string>();closed=false;localOperations=0;deletingImageIds=new Set<string>();
-  constructor(public store:Store,public vault:Vault,public onChange:(w:Workspace)=>void){this.workspace=store.load();this.assets=new Assets(store.directory+'/assets');let interrupted=false;for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='应用在拆帧期间退出，请重新拆帧。';interrupted=true;}if(this.workspace.poseWorkspace?.analysis?.status==='analyzing'){this.workspace.poseWorkspace.analysis.status='failed';this.workspace.poseWorkspace.analysis.error='应用在解析期间退出，请重新解析。';interrupted=true;}if(this.workspace.motionWorkspace?.extraction?.status==='extracting'){this.workspace.motionWorkspace.extraction.status='failed';this.workspace.motionWorkspace.extraction.error='应用在提取期间退出，请重新提取。';interrupted=true;}if(interrupted)this.store.save(this.workspace);}
-  boot():Boot{return {workspace:structuredClone(this.workspace),credentials:{openai:!!this.vault.get('openai'),anthropic:!!this.vault.get('anthropic'),minimax:!!this.vault.get('minimax')},secureStorage:this.vault.secure,dataDirectory:this.store.directory,desktop:true};}
-  changed(){this.store.save(this.workspace);if(!this.closed)this.onChange(structuredClone(this.workspace));}
-  assertAI(){if(this.workspace.workbenchType==='motion-editor')throw new Error('动作编辑器为本地工作台，不接入 AI。');}
-  modelData(id:string){if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中打开 FBX。');const asset=this.workspace.assets.find(a=>a.id===id&&a.type==='model');if(!asset)throw new Error('FBX 素材不存在。');const bytes=this.assets.bytes(asset);return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;}
-  saveModelEditor(state:ModelEditorState){if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存。');if(state.assetId&&!this.workspace.assets.some(a=>a.id===state.assetId&&a.type==='model'))throw new Error('模型不存在。');if(!Number.isInteger(state.clipIndex)||state.clipIndex<0||state.clipIndex>10000||![.25,.5,1,1.5,2].includes(state.speed)||[state.loop,state.showSkeleton,state.showGrid,state.ignoreTranslation??false].some(v=>typeof v!=='boolean'))throw new Error('动作播放参数不合法。');this.workspace.modelEditor={assetId:state.assetId,clipIndex:state.clipIndex,speed:state.speed,loop:state.loop,showSkeleton:state.showSkeleton,showGrid:state.showGrid,ignoreTranslation:state.ignoreTranslation??false};this.changed();}
+  private completionTracker:CompletionTracker;
+  lifecycle=new AbortController();workspace:Workspace;assets:Assets;modelVideo=new ModelVideoExporter(this);motions=new Motions(this);timers=new Map<string,ReturnType<typeof setTimeout>>();polling=new Set<string>();saving=new Set<string>();closed=false;localOperations=0;modelFileJobs=new Set<()=>void>();deletingImageIds=new Set<string>();deletingModelIds=new Set<string>();
+  constructor(public store:Store,public vault:Vault,public onChange:(w:Workspace)=>void,public onComplete:(event:TaskCompletion)=>void=()=>{}){this.workspace=store.load();this.assets=new Assets(store.directory+'/assets');let interrupted=false;for(const pane of this.workspace.terminalWorkspace?.panes||[])for(const message of pane.messages)if(message.running){message.running=false;message.text+='\n[上次终端会话已结束]';interrupted=true;}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='应用在拆帧期间退出，请重新拆帧。';interrupted=true;}if(this.workspace.poseWorkspace?.analysis?.status==='analyzing'){this.workspace.poseWorkspace.analysis.status='failed';this.workspace.poseWorkspace.analysis.error='应用在解析期间退出，请重新解析。';interrupted=true;}if(this.workspace.motionWorkspace?.extraction?.status==='extracting'){this.workspace.motionWorkspace.extraction.status='failed';this.workspace.motionWorkspace.extraction.error='应用在提取期间退出，请重新提取。';interrupted=true;}if(interrupted)this.store.save(this.workspace);this.completionTracker=new CompletionTracker(this.workspace,event=>this.completed(event));}
+  boot():Boot{return {workspace:structuredClone(this.workspace),credentials:{openai:!!this.vault.get('openai'),anthropic:!!this.vault.get('anthropic'),minimax:!!this.vault.get('minimax')},minimaxCreditsConfigured:!!this.vault.getMiniMaxCreditsKey?.(),secureStorage:this.vault.secure,dataDirectory:this.store.directory,desktop:true};}
+  completed(event:TaskCompletion){if(!this.closed){try{this.onComplete(event);}catch{}}}
+  changed(){if(this.closed)return;this.store.save(this.workspace);if(!this.closed){this.onChange(structuredClone(this.workspace));this.completionTracker.observe(this.workspace);}}
+  assertAI(){if(this.closed)throw new Error('工作台已关闭。');if(this.workspace.workbenchType==='motion-editor')throw new Error('动作编辑器为本地工作台，不接入 AI。');if(this.workspace.workbenchType==='terminal')throw new Error('终端工作台通过本地 Shell 操作。');}
+  modelData(id:string){if(this.deletingModelIds.has(id))throw new Error('动作正在删除。');if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中打开 FBX。');const asset=this.workspace.assets.find(a=>a.id===id&&a.type==='model');if(!asset)throw new Error('FBX 素材不存在。');const bytes=this.assets.bytes(asset);return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;}
+  saveModelEditor(state:ModelEditorState){if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存。');if(state.assetId&&!this.workspace.assets.some(a=>a.id===state.assetId&&a.type==='model'))throw new Error('模型不存在。');if(!Number.isInteger(state.clipIndex)||state.clipIndex<0||state.clipIndex>10000||![.25,.5,1,1.5,2].includes(state.speed)||[state.loop,state.showSkeleton,state.showGrid,state.ignoreTranslation??false].some(v=>typeof v!=='boolean'))throw new Error('动作播放参数不合法。');const timelineItems=normalizeMotionTimeline(state.timelineItems??[],id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(typeof (state.timelineEnabled??false)!=='boolean')throw new Error('时间轴模式不合法。');const blendTree=normalizeMotionBlend(state.blendTree??defaultMotionBlend(),id=>this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(blendTree.enabled&&state.timelineEnabled)throw new Error('请选择时间轴或混合树作为当前预览。');this.workspace.modelEditor={blendTree,timelineItems,timelineEnabled:(state.timelineEnabled??false)&&timelineItems.length>0,assetId:state.assetId,clipIndex:state.clipIndex,speed:state.speed,loop:state.loop,showSkeleton:state.showSkeleton,showGrid:state.showGrid,ignoreTranslation:state.ignoreTranslation??false};this.changed();}
+  async saveModelBlend(input:{tree:MotionBlendTree;name:string;bytes:ArrayBuffer}){
+    if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存混合动作。');
+    const tree=normalizeMotionBlend(input.tree,id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model')),name=motionName(input.name);
+    if(!tree.enabled||!(input.bytes instanceof ArrayBuffer)||!input.bytes.byteLength||input.bytes.byteLength>50*1024*1024)throw new Error('混合动作数据不合法。');
+    return this.localOperation(async()=>{
+      const asset=await this.assets.import(name+'.fbx',Buffer.from(input.bytes));
+      asset.motionBlend=structuredClone(tree);
+      this.workspace.assets.push(asset);
+      this.workspace.modelEditor={...this.workspace.modelEditor!,assetId:asset.id,clipIndex:0,timelineEnabled:false,blendTree:{...tree,enabled:false}};
+      this.changed();return structuredClone(asset);
+    });
+  }
+  async deleteModel(id:string,trashFile:(path:string)=>Promise<void>){
+    if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中删除动作。');
+    const asset=this.workspace.assets.find(a=>a.id===id&&a.type==='model');if(!asset)throw new Error('动作不存在。');
+    if(this.localOperations||this.deletingModelIds.has(id))throw new Error('工作台正在处理素材，请完成后再删除动作。');
+    this.deletingModelIds.add(id);
+    try{await this.localOperation(async()=>{const path=this.assets.path(asset);if(existsSync(path))await trashFile(path);
+      this.workspace.assets=this.workspace.assets.filter(a=>a.id!==id);
+      const state=this.workspace.modelEditor;if(state){state.timelineItems=normalizeMotionTimeline((state.timelineItems??[]).filter(item=>item.assetId!==id));state.timelineEnabled=!!state.timelineEnabled&&state.timelineItems.length>0;if(state.blendTree){state.blendTree.nodes=state.blendTree.nodes.filter(node=>node.assetId!==id);state.blendTree.enabled=state.blendTree.enabled&&state.blendTree.nodes.length>0;}if(state.assetId===id){state.assetId=this.workspace.assets.find(a=>a.type==='model')?.id;state.clipIndex=0;}}
+      this.changed();
+    });}finally{this.deletingModelIds.delete(id);}
+  }
   key(p:Provider){this.assertAI();const k=this.vault.get(p);if(!k)throw new Error(`请先在设置中配置 ${p==='openai'?'OpenAI':p==='anthropic'?'Claude':'MiniMax'} API Key。`);return k;}
-  saveSettings(s:Settings,keys:Partial<Record<Provider,string>>){
+  saveSettings(s:Settings,keys:CredentialKeys){
     validateReasoningSettings(s);
     if(s.minimaxRegion!=='cn')throw new Error('当前版本使用 MiniMax 中国区 API，请使用中国区配置。');
     if(!s.openaiModel.trim()||!s.imageModel.trim()||!s.claudeModel.trim())throw new Error('模型 ID 不能为空。');
     if(!['openai','anthropic'].includes(s.chatProvider)||!['MiniMax-H3','MiniMax-H3-Max'].includes(s.videoModel))throw new Error('不支持的供应商或视频模型。');
     if(!['1024x1024','1536x1024','1024x1536','auto'].includes(s.imageSize)||!['low','medium','high','auto'].includes(s.imageQuality))throw new Error('图片参数不支持。');
     for(const p of ['openai','anthropic','minimax'] as Provider[])if(typeof keys[p]==='string')this.vault.set(p,keys[p]!.trim());
+    if(typeof keys.minimaxCredits==='string'){if(!this.vault.setMiniMaxCreditsKey)throw new Error('积分查询凭据存储不可用。');this.vault.setMiniMaxCreditsKey(keys.minimaxCredits.trim());}
     this.workspace.settings={...s};this.changed();return this.boot();
   }
+  apiBalances(force=false){return apiBalanceReader(this.vault).read(this.workspace.settings.minimaxRegion,force===true);}
   async testConnection(p:Provider){return provider.testConnection(p,this.key(p),this.workspace.settings.minimaxRegion);}
   saveDraft(kind:Kind,draft:Draft){this.assertKind(kind);this.assertDraft(draft);this.workspace.drafts[kind]=structuredClone(draft);this.changed();}
   assertKind(k:string){if(!['image','video'].includes(k))throw new Error('会话不存在。');}
   assertDraft(d:Draft){if(typeof d.prompt!=='string'||d.prompt.length>30000||!Array.isArray(d.attachmentIds)||d.attachmentIds.length>12||!['first_frame','reference','first_last','text'].includes(d.mode))throw new Error('草稿格式不合法。');for(const id of [...d.attachmentIds,d.baseImageId,d.lastImageId,d.editImageId].filter(Boolean)){if(this.deletingImageIds.has(id!))throw new Error('此图片正在删除，请重新选择素材。');if(!this.workspace.assets.some(a=>a.id===id))throw new Error('素材不存在。');}}
-  async localOperation<T>(fn:()=>Promise<T>):Promise<T>{if(this.closed)throw new Error('工作台已关闭。');this.localOperations++;try{return await fn();}finally{this.localOperations--;}}
+  async localOperation<T>(fn:()=>Promise<T>):Promise<T>{if(this.closed)throw new Error('工作台已关闭。');this.localOperations++;try{const result=await fn();if(this.closed)throw new Error('工作台已关闭，任务已取消。');return result;}finally{this.localOperations--;}}
   async importFiles(files:ImportFile[]){return this.localOperation(async()=>{if(files.length>12)throw new Error('一次最多上传 12 个文件。');const imported:Asset[]=[];for(const f of files){if(this.workspace.workbenchType==='motion-editor'&&!/\.fbx$/i.test(f.name))throw new Error('动作编辑器仅支持 FBX 文件。');if(this.workspace.workbenchType!=='motion-editor'&&/\.fbx$/i.test(f.name))throw new Error('请在动作编辑器中导入 FBX。');const a=await this.assets.import(f.name,Buffer.from(f.bytes));this.workspace.assets.push(a);imported.push(a);this.changed();}return imported;});}
   select(kind:Kind,id:string){this.assertKind(kind);if(!this.workspace.assets.some(a=>a.id===id&&a.type===kind))throw new Error('素材不存在。');if(kind==='image')this.workspace.selectedImageId=id;else this.workspace.selectedVideoId=id;this.changed();}
   async deleteGeneratedImage(id:string,trashFile:(path:string)=>Promise<void>){
@@ -123,7 +155,7 @@ export class Service {
   }
   taskAssets(t:Task){const ids=[...t.assetIds,t.kind==='image'?t.editImageId:t.baseImageId,t.kind==='video'?t.lastImageId:undefined].filter(Boolean);return [...new Set(ids)].map(id=>{const a=this.workspace.assets.find(a=>a.id===id);if(!a)throw new Error('素材不存在。');return a;});}
   videoAssets(t:Task){const list=this.taskAssets(t);if(t.mode==='first_frame')return list.filter(a=>a.type==='document'||a.id===t.baseImageId||a.type==='video'||a.type==='image');return list;}
-  update(t:Task,patch:Partial<Task>){Object.assign(t,patch,{updatedAt:Date.now()});this.changed();}
+  update(t:Task,patch:Partial<Task>){if(this.closed)return;Object.assign(t,patch,{updatedAt:Date.now()});this.changed();}
   async run(t:Task){
     let phase='准备素材';
     try{
@@ -136,6 +168,7 @@ export class Service {
         const history=this.workspace.messages.filter(m=>m.kind===t.kind&&m.taskId!==t.id&&!m.assetIds?.length).map(m=>({role:m.role,text:m.text}));
         phase=t.settings.chatProvider==='openai'?'OpenAI 提示词处理':'Claude 提示词处理';
         prompt=await provider.chat(t.settings,this.key(t.settings.chatProvider),prompt,images,history,t.discussion);
+        if(this.closed)return;
         if(t.discussion){this.finishText(t,prompt);return;}
       }
       this.update(t,{effectivePrompt:prompt});
@@ -157,8 +190,8 @@ export class Service {
       }
     }catch(e){const unknown=e instanceof provider.ProviderError&&e.uncertain&&t.state==='submitting';const note=unknown?'提交结果待核实，请先查看供应商任务记录，不要重复生成。':t.kind==='video'&&t.state==='preparing'&&!t.discussion?'视频尚未提交到 MiniMax。':'';this.update(t,{state:unknown?'submission_unknown':'failed',error:`${phase}失败。${note}\n${this.error(e)}`});}
   }
-  finishText(t:Task,text:string){this.workspace.messages.push({id:randomUUID(),kind:t.kind,role:'assistant',text,taskId:t.id,createdAt:Date.now()});this.update(t,{state:'succeeded'});}
-  finishAsset(t:Task,a:Asset){if(t.imageEdit){const source=this.workspace.assets.find(a=>a.id===t.imageEdit!.sourceAssetId);if(source)this.updateFrameVersion(source,a);}this.workspace.assets.push(a);if(t.kind==='image'&&this.workspace.selectedImageId===t.previewAtSubmit)this.workspace.selectedImageId=a.id;else if(t.kind==='video'&&this.workspace.selectedVideoId===t.previewAtSubmit)this.workspace.selectedVideoId=a.id;t.outputAssetIds=[a.id];this.finishText(t,'生成完成，素材已保存到本地。');}
+  finishText(t:Task,text:string){if(this.closed)return;this.workspace.messages.push({id:randomUUID(),kind:t.kind,role:'assistant',text,taskId:t.id,createdAt:Date.now()});this.update(t,{state:'succeeded'});}
+  finishAsset(t:Task,a:Asset){if(this.closed)return;if(t.imageEdit){const source=this.workspace.assets.find(a=>a.id===t.imageEdit!.sourceAssetId);if(source)this.updateFrameVersion(source,a);}this.workspace.assets.push(a);if(t.kind==='image'&&this.workspace.selectedImageId===t.previewAtSubmit)this.workspace.selectedImageId=a.id;else if(t.kind==='video'&&this.workspace.selectedVideoId===t.previewAtSubmit)this.workspace.selectedVideoId=a.id;t.outputAssetIds=[a.id];this.finishText(t,'生成完成，素材已保存到本地。');}
   schedule(t:Task,ms=5000){if(this.closed)return;const prev=this.timers.get(t.id);if(prev)clearTimeout(prev);this.timers.set(t.id,setTimeout(()=>{this.timers.delete(t.id);void this.poll(t);},ms));}
   async poll(t:Task){
     if(this.closed||this.polling.has(t.id))return;this.polling.add(t.id);
@@ -176,7 +209,7 @@ export class Service {
   }
   async saveVideo(t:Task){if(this.saving.has(t.id))return;this.saving.add(t.id);try{
     const u=new URL(t.resultUrl!);if(u.protocol!=='https:')throw new Error('视频下载地址必须使用 HTTPS。');
-    const response=await fetchHTTP(u,{signal:AbortSignal.timeout(120000)});if(!response.ok)throw new Error(`下载失败 (${response.status})`);
+    const response=await fetchHTTP(u,{signal:AbortSignal.any([this.lifecycle.signal,AbortSignal.timeout(120000)])});if(!response.ok)throw new Error(`下载失败 (${response.status})`);
     const limit=200*1024*1024;const reader=response.body?.getReader();if(!reader)throw new Error('下载没有内容。');let total=0;const chunks:Uint8Array[]=[];
     while(true){const {done,value}=await reader.read();if(done)break;total+=value.length;if(total>limit){await reader.cancel();throw new Error('视频结果超过 200 MB。');}chunks.push(value);}
     const b=Buffer.concat(chunks);const a=await this.assets.import('生成视频.mp4',b,t.id);if(a.warning)throw new Error(a.warning);this.finishAsset(t,a);if(t.autoFrameCount){try{await this.splitVideo({assetId:a.id,count:t.autoFrameCount,requestId:'auto-'+t.id});}catch{/* The video remains saved; frame extraction can be retried locally. */}}
@@ -184,5 +217,5 @@ export class Service {
   async retryTask(id:string){this.assertAI();const t=this.workspace.tasks.find(t=>t.id===id);if(!t)throw new Error('任务不存在。');if(t.state==='save_failed'&&t.resultUrl){this.update(t,{state:'saving',error:undefined});await this.saveVideo(t);}else if(t.remoteTaskId&&['queued','running','saving'].includes(t.state)){this.schedule(t,0);}else throw new Error('此任务不能安全地自动重试；请查看错误后主动重新发送。');}
   resume(){if(this.workspace.workbenchType==='motion-editor')return;for(const t of this.workspace.tasks){if(!isBusy(t))continue;if(t.remoteTaskId){this.update(t,{state:'queued'});this.schedule(t,1000);}else this.update(t,{state:t.state==='submitting'?'submission_unknown':'failed',error:'应用在任务期间退出。未自动重新提交，请核实生成结果。'});}}
   error(e:unknown){let m=e instanceof Error?e.message:'发生未知错误。';for(const p of ['openai','anthropic','minimax'] as Provider[]){const k=this.vault.get(p);if(k)m=m.split(k).join('[已隐藏]');}return m.slice(0,1500);}
-  close(){this.closed=true;this.modelVideo.close();for(const timer of this.timers.values())clearTimeout(timer);this.timers.clear();}
+  close(cancelTasks=false){if(cancelTasks&&!this.closed){for(const task of this.workspace.tasks)if(isBusy(task)||task.state==='submission_unknown'){task.state='cancelled';task.error='因删除 Worktree 停止本地处理；已提交的远程生成可能继续运行或计费。';task.updatedAt=Date.now();}const pose=this.workspace.poseWorkspace?.analysis;if(pose?.status==='analyzing'){pose.status='failed';pose.error='因删除 Worktree 取消。';}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='因删除 Worktree 取消。';}const motion=this.workspace.motionWorkspace?.extraction;if(motion?.status==='extracting'){motion.status='cancelled';motion.error='因删除 Worktree 取消。';}this.store.save(this.workspace);}this.closed=true;this.lifecycle.abort();this.assets.close();for(const stop of this.modelFileJobs)stop();this.modelFileJobs.clear();this.modelVideo.close();for(const timer of this.timers.values())clearTimeout(timer);this.timers.clear();}
 }

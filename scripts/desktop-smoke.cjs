@@ -15,7 +15,7 @@ app.whenReady().then(async()=>{
   for(let i=0;i<100;i++){win=BrowserWindow.getAllWindows()[0];if(win)break;await wait(50);}assert.ok(win);
   win.webContents.on('console-message',(_event,level,message)=>{if(level>=2)console.log('Renderer:',message);});
   await until("document.querySelector('.workbench-launcher') && !!window.toolkit");const launcher=win;await capture('desktop-launcher-empty.png');
-  assert.equal((await evaluate('window.toolkit.catalog()')).types.length,2);assert.equal(await evaluate("window.toolkit.boot().then(()=>false,()=>true)"),true);
+  assert.equal(await evaluate("window.toolkit.catalog().then(c=>document.querySelectorAll('.template-card').length===c.types.length&&c.types.some(t=>t.id==='image-video')&&c.types.some(t=>t.id==='motion-editor'))"),true);assert.equal(await evaluate("window.toolkit.boot().then(()=>false,()=>true)"),true);
   assert.equal(await evaluate("document.querySelectorAll('.launcher-recents,.launcher-name,.launcher-footer').length"),0);await evaluate("document.querySelector('.template-card').click()");await until("!!document.querySelector('.new-workbench-dialog')");await click('创建工作台');await until("document.querySelector('.workbench') && !!window.toolkit");assert.equal(BrowserWindow.getAllWindows().length,1);
   assert.equal(await evaluate("document.querySelectorAll('.chat-panel').length"),2);assert.equal(await evaluate("document.querySelectorAll('.preview-panel').length"),2);
   assert.equal(await evaluate("document.querySelector('.video .api-region').textContent"),'API · 中国区');
