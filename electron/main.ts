@@ -1,3 +1,6 @@
+import {validateCutoutCropPNG,writeCutoutCropPNG} from './cutout-crop';
+import {writeUILayoutPair,readUILayout} from './ui-layout';
+import {validateUILayout} from '../src/shared/ui-layout';
 import {apiBalanceReader,queryMiniMaxCredits,setMiniMaxCreditsSession} from './api-balance';
 import {randomUUID} from 'node:crypto';
 import {TaskNotifications} from './task-notifications';
@@ -39,7 +42,7 @@ class SecureVault implements Vault {
   setMiniMaxCreditsKey(value:string){this.set('minimaxCredits',value);}
   get(p:Provider|'minimaxCredits'){if(this.memory[p])return this.memory[p];if(this.secure&&this.encrypted[p]){try{return safeStorage.decryptString(Buffer.from(this.encrypted[p]!,'base64'));}catch{return undefined;}}return undefined;}
   set(p:Provider|'minimaxCredits',value:string){
-    if(!['openai','anthropic','minimax','minimaxCredits'].includes(p))throw new Error('供应商不存在。');
+    if(!['openai','anthropic','minimax','tripo','minimaxCredits'].includes(p))throw new Error('供应商不存在。');
     if(this.secure){if(value)this.encrypted[p]=safeStorage.encryptString(value).toString('base64');else delete this.encrypted[p];writeFileSync(this.file+'.tmp',JSON.stringify(this.encrypted),{mode:0o600});renameSync(this.file+'.tmp',this.file);}else{if(value)this.memory[p]=value;else{delete this.memory[p];delete this.encrypted[p];if(existsSync(this.file))writeFileSync(this.file,JSON.stringify(this.encrypted),{mode:0o600});}}
   }
 }
@@ -107,7 +110,8 @@ function openEditor(workbenchId:string,assetId:string,tool:ImageTool){
 async function packagedSelfTest(){
   try{
     if(app.getName()!=='Laputa'||app.getPath('userData')!==dataDirectory)throw new Error('应用名称或数据目录配置不正确');
-    const picker=launcher!;for(let i=0;i<300;i++){if(await picker.webContents.executeJavaScript("!!document.querySelector('.template-card')").catch(()=>false))break;await new Promise(r=>setTimeout(r,100));}
+    // Keep test animation frames running when macOS occludes the test window.
+    const picker=launcher!;picker.webContents.setBackgroundThrottling(false);for(let i=0;i<300;i++){if(await picker.webContents.executeJavaScript("!!document.querySelector('.template-card')").catch(()=>false))break;await new Promise(r=>setTimeout(r,100));}
     if(!await picker.webContents.executeJavaScript("!!document.querySelector('.template-card')&&!document.querySelector('.launcher-recents,.launcher-name')"))throw new Error('模板 Gallery 未加载');
     if(process.env.TOOLKIT_SELF_TEST_OUTPUT){mkdirSync(process.env.TOOLKIT_SELF_TEST_OUTPUT,{recursive:true});writeFileSync(join(process.env.TOOLKIT_SELF_TEST_OUTPUT,'packaged-launcher.png'),(await picker.webContents.capturePage()).toPNG());}
     const entry=await picker.webContents.executeJavaScript("window.toolkit.createWorkbench({type:'image-video'})") as WorkbenchInfo;
@@ -182,6 +186,49 @@ if(!app.requestSingleInstanceLock())app.quit();else{
       for(const ctx of contexts.values())if(ctx.workbenchId&&!ctx.window.isDestroyed()&&manager.info(ctx.workbenchId).worktreeId===entry.worktreeId)ctx.window.webContents.send('worktree:files-changed');
     });
     handle('workbenches:open',(_context,id)=>{openWorkbench(id);});handle('workbenches:show',()=>{selectWorkbench();});handle('workbenches:current',context=>context.workbenchId);
+    scoped('ui-layout:save',(s,_c,d)=>s.saveUILayout(d));
+    scoped('cutout:repair-resolve',(s,_c,id)=>s.resolveCutoutRepair(id));
+    scoped('cutout:director',(s,_c,input)=>s.director.run(input));
+    scoped('cutout:director-review',(s,_c,id,image,bounds)=>s.director.review(id,image,bounds));
+    scoped('cutout:director-cancel',(s,_c,id)=>s.director.cancel(id));
+    scoped('cutout:director-dismiss',(s,_c,id)=>s.director.dismiss(id));
+    scoped('cutout:motion',(s,_c,input)=>s.generateCutoutMotion(input));
+    scoped('cutout:layers',(s,_c,input)=>s.generateCutoutLayers(input));
+    scoped('cutout:rig',(s,_c,input)=>s.generateCutoutRig(input));
+    scoped('cutout:repair',(s,_c,input)=>s.repairCutoutPart(input));
+    scoped('cutout:repair-review',(s,_c,id,e)=>s.reviewCutoutRepair(id,e));
+    scoped('cutout:repair-finish',(s,_c,id,stop)=>s.finishCutoutRepair(id,stop));
+    scoped('cutout:save',(s,_c,d,r)=>s.saveCutout(d,r));
+    scoped('cutout:sample',s=>{if(s.workspace.workbenchType!=='cutout-studio')throw new Error('请在二维角色绘制台打开样例。');const b=readFileSync(join(__dirname,'assets/sample.laputa2d.zip'));return new Uint8Array(b).buffer;});
+    scoped('cutout:crop-export',(s,c,bytes,name)=>s.localOperation(async()=>{
+      if(s.workspace.workbenchType!=='cutout-studio')throw Error('请在二维角色绘制台导出裁切图片。');validateCutoutCropPNG(bytes);
+      const safe=(typeof name==='string'?name:'角色裁切').replace(/[\\/\x00-\x1f:*?"<>|]/g,'-').replace(/^\.+/,'').slice(0,100).trim()||'角色裁切';
+      const result=await dialog.showSaveDialog(c.window,{title:'保存裁切 PNG · 选择文件夹和文件名',defaultPath:join(manager.treePath(manager.info(c.workbenchId!).worktreeId),safe+'.png'),filters:[{name:'PNG 图片',extensions:['png']}]});
+      if(result.canceled||!result.filePath)return;if(s.closed)throw Error('工作台已关闭。');const path=writeCutoutCropPNG(result.filePath,bytes);notifyProjectFiles(c.workbenchId!);return path;
+    }));
+    scoped('cutout:export',(s,c,bytes,name)=>s.localOperation(async()=>{
+      if(s.workspace.workbenchType!=='cutout-studio'||!(bytes instanceof ArrayBuffer)||bytes.byteLength>24_000_000)throw new Error('二维角色导出数据无效。');
+      const safe=typeof name==='string'?name.replace(/[\\/\x00-\x1f:*?"<>|]/g,'-').slice(0,100):'二维角色';
+      const result=await dialog.showSaveDialog(c.window,{title:'导出二维角色工程',defaultPath:join(manager.treePath(manager.info(c.workbenchId!).worktreeId),(safe||'二维角色')+'.laputa2d.zip'),filters:[{name:'二维角色工程',extensions:['zip']}]});
+      if(result.canceled||!result.filePath)return;if(s.closed)throw new Error('工作台已关闭。');
+      const temp=result.filePath+'.'+randomUUID()+'.tmp';try{writeFileSync(temp,Buffer.from(bytes));renameSync(temp,result.filePath);}finally{if(existsSync(temp))rmSync(temp);}
+      notifyProjectFiles(c.workbenchId!);return result.filePath;
+    }));
+    scoped('ui-layout:open',(s,c)=>s.localOperation(async()=>{
+      if(s.workspace.workbenchType!=='ui-layout')throw new Error('请在 UI 布局编辑器中打开布局。');
+      const result=await dialog.showOpenDialog(c.window,{defaultPath:manager.treePath(manager.info(c.workbenchId!).worktreeId),properties:['openFile'],filters:[{name:'Laputa UI 布局',extensions:['json']}]});
+      if(result.canceled||!result.filePaths[0])return;const document=readUILayout(result.filePaths[0]);if(s.closed)throw new Error('工作台已关闭。');s.saveUILayout(document);return document;
+    }));
+    scoped('ui-layout:export',(s,c,input,png)=>s.localOperation(async()=>{
+      if(s.workspace.workbenchType!=='ui-layout')throw new Error('请在 UI 布局编辑器中导出布局。');
+      const document=validateUILayout(input),name=document.name.replace(/[\\/\x00-\x1f:*?"<>|]/g,'-').replace(/^\.+/,'').trim()||'UI Layout';
+      const result=await dialog.showSaveDialog(c.window,{title:'导出 UI 布局（JSON + PNG）',defaultPath:join(manager.treePath(manager.info(c.workbenchId!).worktreeId),name+'.json'),filters:[{name:'布局 JSON（同时保存同名 PNG）',extensions:['json']}]});
+      if(result.canceled||!result.filePath)return;
+      const jsonPath=/\.json$/i.test(result.filePath)?result.filePath:result.filePath+'.json',pngPath=jsonPath.slice(0,-5)+'.png';
+      if(existsSync(jsonPath)||existsSync(pngPath)){const answer=await dialog.showMessageBox(c.window,{type:'question',message:'替换已有布局文件？',detail:'将同时保存以下两个文件，已有文件会被替换：\n'+jsonPath+'\n'+pngPath,buttons:['取消','替换并保存'],defaultId:0,cancelId:0});if(answer.response!==1)return;}
+      if(s.closed)throw new Error('工作台已关闭。');const paths=writeUILayoutPair(jsonPath,document,png);s.saveUILayout(document);notifyProjectFiles(c.workbenchId!);s.completed({id:'ui-layout:'+randomUUID(),label:'UI 布局导出'});return paths;
+    }));
+    scoped('tripo:draft',(s,_c,d)=>s.tripo.saveDraft(d));scoped('tripo:generate',(s,_c,input)=>s.tripo.generate(input));scoped('tripo:retry',(s,_c,id)=>s.tripo.retry(id));scoped('tripo:select',(s,_c,id)=>s.tripo.select(id));
     scoped('boot',(service,context)=>({...service.boot(),...worktreeBoot(context.workbenchId!)}));
     scoped('terminal:list',(_s,c)=>terminals.list(c.workbenchId!));scoped('terminal:create',(_s,c,id)=>terminals.create(c.workbenchId!,id));scoped('terminal:close',(_s,c,id)=>terminals.close(c.workbenchId!,id));scoped('terminal:write',(_s,c,id,data)=>terminals.write(c.workbenchId!,id,data));scoped('terminal:submit',(_s,c,id,text)=>terminals.submit(c.workbenchId!,id,text));scoped('terminal:codex-cancel',(_s,c,id)=>terminals.cancelCodex(c.workbenchId!,id));scoped('terminal:resize',(_s,c,id,cols,rows)=>terminals.resize(c.workbenchId!,id,cols,rows));scoped('terminal:view',(_s,c,id,view)=>terminals.view(c.workbenchId!,id,view));
     scoped('settings:save',(service,_context,s,k)=>{const boot=service.saveSettings(s,k);for(const [id,other] of manager.services)changedWorkspace(id,structuredClone(other.workspace));return {...boot,...worktreeBoot(_context.workbenchId!)};});

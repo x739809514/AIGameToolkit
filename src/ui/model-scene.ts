@@ -1,3 +1,4 @@
+import {disposeAttachedObject,ModelAttachments} from './model-attachments';
 import type {BaseHumanoid} from './base-humanoid';
 import {MotionPlayer} from './motion-player';
 import type {MotionTimelineItem} from '../shared/motion-timeline';
@@ -5,18 +6,18 @@ import type {MotionBlendTree} from '../shared/motion-blend';
 import * as THREE from 'three';
 import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-export interface ModelNode {id:string;name:string;type:string;children:ModelNode[]}
-export interface ModelInfo {mappedBones?:number;sourceBones?:number;missingBones?:string[];nodes:ModelNode[];clips:{name:string;duration:number}[];meshes:number;bones:number;missingTextures:boolean}
+export interface ModelNode {id:string;name:string;type:string;children:ModelNode[];attachmentId?:string}
+export interface ModelInfo {motionError?:string;mappedBones?:number;sourceBones?:number;missingBones?:string[];nodes:ModelNode[];clips:{name:string;duration:number}[];meshes:number;bones:number;missingTextures:boolean}
 const blank='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==';
 export class ModelScene {
   scene=new THREE.Scene();camera=new THREE.PerspectiveCamera(40,1,.01,10000);renderer:THREE.WebGLRenderer;controls:OrbitControls;
-  avatar:BaseHumanoid;player:MotionPlayer;infos=new Map<string,ModelInfo>();
+  attachments:ModelAttachments;avatar:BaseHumanoid;player:MotionPlayer;infos=new Map<string,ModelInfo>();
   skeleton?:THREE.SkeletonHelper;grid?:THREE.GridHelper;selection?:THREE.BoxHelper;
   exporting=false;
   ignoreTranslation=false;
   playing=false;speed=1;loop=true;time=0;duration=0;clipIndex=0;radius=1;center=new THREE.Vector3();frame=0;disposed=false;observer:ResizeObserver;last=performance.now();lastReport=0;
   constructor(public host:HTMLDivElement,public onTime:(time:number,playing:boolean)=>void,avatar:BaseHumanoid){
-    this.avatar=avatar;this.player=new MotionPlayer(avatar);
+    this.avatar=avatar;this.attachments=new ModelAttachments(avatar.group);this.player=new MotionPlayer(avatar);
     this.renderer=new THREE.WebGLRenderer({antialias:true});this.renderer.setPixelRatio(Math.min(devicePixelRatio,2));this.renderer.setClearColor(0x15191f);this.renderer.outputColorSpace=THREE.SRGBColorSpace;
     this.renderer.domElement.setAttribute('aria-label','三维模型预览');host.append(this.renderer.domElement);
     this.controls=new OrbitControls(this.camera,this.renderer.domElement);this.controls.enableDamping=true;this.controls.dampingFactor=.12;
@@ -31,13 +32,17 @@ export class ModelScene {
     if(this.infos.has(id))return this.infos.get(id)!;
     let missingTextures=false;const manager=new THREE.LoadingManager();manager.setURLModifier(url=>{if(url.startsWith('blob:')||url.startsWith('data:'))return url;missingTextures=true;return blank;});
     const source=new FBXLoader(manager).parse(bytes,'');source.visible=false;this.scene.add(source);source.updateMatrixWorld(true);
-    const registered=this.player.register(id,source);this.player.select(id,0);
-    this.renderer.domElement.dataset.loaded='true';this.renderer.domElement.dataset.mappedBones=String(registered.retarget.mapping.size);
     let sourceBones=0;source.traverse(node=>{if((node as THREE.Bone).isBone)sourceBones++;});
-    const info={...this.baseInfo(),sourceBones,mappedBones:registered.retarget.mapping.size,missingBones:registered.retarget.missing,clips:source.animations.map((clip,i)=>({name:clip.name||`动作 ${i+1}`,duration:clip.duration}))};this.infos.set(id,info);return info;
+    let registered:ReturnType<MotionPlayer['register']>|undefined,motionError:string|undefined;
+    if(source.animations.length){try{registered=this.player.register(id,source);this.player.select(id,0);}catch(error){motionError=(error as Error).message;}}
+    this.renderer.domElement.dataset.loaded='true';this.renderer.domElement.dataset.mappedBones=String(registered?.retarget.mapping.size??0);
+    const info:ModelInfo={...this.baseInfo(),sourceBones,mappedBones:registered?.retarget.mapping.size,missingBones:registered?.retarget.missing,missingTextures,motionError,clips:registered?source.animations.map((clip,i)=>({name:clip.name||`动作 ${i+1}`,duration:clip.duration})):[]};
+    // Props are valid FBX assets even when they have no humanoid animation.
+    if(!registered)disposeAttachedObject(source);this.infos.set(id,info);return info;
   }
+
   baseInfo():ModelInfo {
-    let meshes=0,bones=0;const nodes=(node:THREE.Object3D):ModelNode=>{if((node as THREE.Mesh).isMesh)meshes++;if((node as THREE.Bone).isBone)bones++;return {id:node.uuid,name:node.name||node.type,type:node.type,children:node.children.map(nodes)};};
+    let meshes=0,bones=0;const nodes=(node:THREE.Object3D):ModelNode=>{if(this.attachments.parents.has(node.uuid)){if((node as THREE.Mesh).isMesh)meshes++;if((node as THREE.Bone).isBone)bones++;}return {id:node.uuid,name:node.name||node.type,type:node.type,children:node.children.map(nodes),attachmentId:node.userData.attachmentId};};
     const tree=nodes(this.avatar.group);this.renderer.domElement.dataset.meshes=String(meshes);this.renderer.domElement.dataset.bones=String(bones);this.renderer.domElement.dataset.baseModel='true';this.renderer.domElement.dataset.baseName='Y Bot';
     return {nodes:[tree],meshes,bones,missingTextures:false,clips:[]};
   }

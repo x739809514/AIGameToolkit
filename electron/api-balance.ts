@@ -1,4 +1,5 @@
 import {fetchHTTP,networkDetail} from './network';
+import {tripoRequest} from './tripo';
 import {balanceProviders,type APIBalance} from '../src/shared/api-balance';
 import type {MiniMaxRegion,Provider} from '../src/shared/types';
 import type {Vault} from './service';
@@ -43,6 +44,12 @@ export class BalanceReader {
   return Promise.all(balanceProviders.map(async provider=>{
    const key=this.vault.get(provider),base={provider,checkedAt:Date.now()};
    if(!key){this.entries.delete(provider);return {...base,status:'unconfigured' as const,message:'在设置中接入 API 后显示账户状态'};}
+   if(provider==='tripo'){
+    let entry=this.entries.get(provider);if(!entry||entry.key!==key){entry={key,region};this.entries.set(provider,entry);}
+    if(entry.pending)return entry.pending;
+    const ttl=entry.result?.status==='error'?30000:300000;if(entry.result&&Date.now()-entry.result.checkedAt<(force?5000:ttl))return structuredClone(entry.result);
+    const current=entry;current.pending=(async():Promise<APIBalance>=>{try{const data=await tripoRequest('/account/balance',key,new AbortController().signal);if(typeof data.balance!=='number'||!Number.isFinite(data.balance)||data.balance<0)throw new Error('余额格式错误');return {...base,status:'available',credits:{status:'available',amount:data.balance,message:typeof data.frozen==='number'?`冻结积分：${data.frozen}`:'Tripo 可用积分'},message:'Tripo 可用积分，实际消耗以服务商为准。'};}catch{return {...base,status:'error',message:'Tripo 积分查询失败，请检查 Key 或在控制台查看。'};}})().then(result=>{current.result=result;return structuredClone(result);}).finally(()=>{current.pending=undefined;});return current.pending;
+   }
    if(provider!=='minimax'||region!=='cn')return {...base,status:'unsupported' as const,message:provider==='minimax'?'当前地区未接入余额接口，请在服务商控制台查看':'当前普通 API Key 未提供可用的余额查询接口，请在服务商控制台查看'};
    const creditsKey=this.vault.getMiniMaxCreditsKey?.()||(key.startsWith('sk-cp-')?key:undefined);
    let entry=this.entries.get(provider);if(!entry||entry.key!==key||entry.creditsKey!==creditsKey||entry.region!==region){entry={key,creditsKey,region};this.entries.set(provider,entry);}

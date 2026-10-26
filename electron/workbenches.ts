@@ -1,3 +1,4 @@
+import {tripoBusy} from '../src/shared/tripo';
 import {migrateWorkbenchStorage} from './workbench-storage';
 import {workspaceFilePath} from './workspace-files';
 import type {TaskCompletion} from './task-notifications';
@@ -66,7 +67,7 @@ export class Workbenches {
     const tree=structuredClone(this.treeInfo(id)),entries=this.entries.filter(e=>e.worktreeId===id).map(e=>structuredClone(e));
     if(entries.some(e=>this.deleting.has(e.id)))throw new Error('此 Worktree 中有工作台正在删除。');
     const services=entries.map(e=>this.get(e.id));
-    if(!force&&services.some(s=>s.localOperations||s.workspace.tasks.some(t=>isBusy(t)||t.state==='submission_unknown')||s.workspace.motionWorkspace?.extraction?.status==='extracting'||s.workspace.frameWorkspace?.sequences.some(seq=>seq.status==='extracting')||s.workspace.poseWorkspace?.analysis?.status==='analyzing'))throw new Error('此 Worktree 有正在运行或提交状态未确认的任务，请等待任务完成或核实状态后再删除。');
+    if(!force&&services.some(s=>s.localOperations||s.workspace.tripoWorkspace?.tasks.some(t=>tripoBusy(t)||t.state==='submission_unknown')||s.workspace.tasks.some(t=>isBusy(t)||t.state==='submission_unknown')||s.workspace.motionWorkspace?.extraction?.status==='extracting'||s.workspace.frameWorkspace?.sequences.some(seq=>seq.status==='extracting')||s.workspace.poseWorkspace?.analysis?.status==='analyzing'))throw new Error('此 Worktree 有正在运行或提交状态未确认的任务，请等待任务完成或核实状态后再删除。');
     const root=this.treePath(id),sources=entries.map(e=>({id:e.id,path:this.path(e.id)})),staging=join(this.directory,'.deleted-worktrees',randomUUID()),moved:{from:string;to:string}[]=[];
     this.deletingTrees.add(id);this.deletingRoots.add(root);for(const entry of entries)this.deleting.add(entry.id);
     try{
@@ -92,7 +93,7 @@ export class Workbenches {
   async deleteWorkbench(id:string,trash:(path:string)=>Promise<void>){
     const entry=structuredClone(this.info(id));if(this.deleting.has(id))throw new Error('工作台正在删除。');
     const service=this.get(id);
-    if(service.workspace.motionWorkspace?.extraction?.status==='extracting'||service.localOperations||service.workspace.tasks.some(t=>isBusy(t)||t.state==='submission_unknown'))throw new Error('此工作台有正在运行或提交状态未确认的任务，请等待任务完成或核实状态后再删除。');
+    if(service.workspace.motionWorkspace?.extraction?.status==='extracting'||service.localOperations||service.workspace.tripoWorkspace?.tasks.some(t=>tripoBusy(t)||t.state==='submission_unknown')||service.workspace.tasks.some(t=>isBusy(t)||t.state==='submission_unknown'))throw new Error('此工作台有正在运行或提交状态未确认的任务，请等待任务完成或核实状态后再删除。');
     const source=this.path(id),staging=join(this.directory,'.deleted-workbenches',randomUUID()),moved:{from:string;to:string}[]=[];
     this.deleting.add(id);service.close();service.store.close();this.services.delete(id);
     try{

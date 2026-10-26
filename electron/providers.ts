@@ -1,3 +1,4 @@
+import {tripoRequest} from './tripo';
 import { defaults, supportsSolReasoning, validateReasoningSettings, minimaxAPI } from '../src/shared/types';
 import type { Asset, Settings, Task, MiniMaxRegion } from '../src/shared/types';
 import {fetchHTTP,networkDetail} from './network';
@@ -56,7 +57,7 @@ export async function generateImage(task:Task,assets:Asset[],bytes:(a:Asset)=>Bu
   if(refs.length){
     const form=new FormData();form.set('model',s.imageModel);form.set('prompt',task.effectivePrompt||task.prompt);form.set('size',s.imageSize);form.set('quality',s.imageQuality);
     refs.forEach((a,i)=>form.append('image[]',new Blob([new Uint8Array(edit&&i===0?edit.source:bytes(a))],{type:edit&&i===0?'image/png':a.mime}),edit&&i===0?'source.png':a.name));
-    if(edit){form.set('size','auto');form.set('output_format','png');if(edit.mask)form.set('mask',new Blob([new Uint8Array(edit.mask)],{type:'image/png'}),'mask.png');if(task.imageEdit?.operation==='remove_background')form.set('background','transparent');}body=form;headers={'Authorization':`Bearer ${key}`};
+    if(edit){form.set('size','auto');form.set('output_format','png');if(edit.mask)form.set('mask',new Blob([new Uint8Array(edit.mask)],{type:'image/png'}),'mask.png');if(task.imageEdit?.operation==='remove_background'||task.cutoutRepair)form.set('background','transparent');}body=form;headers={'Authorization':`Bearer ${key}`};
   }else{body=JSON.stringify({model:s.imageModel,prompt:task.effectivePrompt||task.prompt,size:s.imageSize,quality:s.imageQuality,n:1});headers=auth(key);}
   const data=await jsonRequest(`https://api.openai.com/v1/images/${refs.length?'edits':'generations'}`,{method:'POST',headers,body},600000);
   if(!data.data?.[0]?.b64_json)throw new ProviderError('图片响应没有图片数据，不能确定生成结果。',true);
@@ -87,6 +88,7 @@ export async function chat(s:Settings,key:string,prompt:string,images:string[],h
   if(!data.choices?.[0]?.message?.content)throw new Error('OpenAI 未返回文本。');return data.choices[0].message.content;
 }
 export async function testConnection(provider:string,key:string,region:MiniMaxRegion='cn'){
+  if(provider==='tripo'){const data=await tripoRequest('/account/balance',key,new AbortController().signal);if(typeof data.balance!=='number')throw new Error('Tripo 余额响应无效。');return `Tripo 连接成功，可用积分 ${data.balance}。此检查不创建生成任务。`;}
   if(provider==='openai')await jsonRequest('https://api.openai.com/v1/models',{headers:auth(key)},20000);
   else if(provider==='anthropic')await jsonRequest('https://api.anthropic.com/v1/models',{headers:{'x-api-key':key,'anthropic-version':'2023-06-01'}},20000);
   else await jsonRequest(`${minimaxAPI(region).baseURL}/v2/query/video_generation?page_num=1&page_size=1`,{headers:auth(key)},20000);

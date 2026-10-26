@@ -1,13 +1,22 @@
+import type {DirectorInput,DirectorState,DirectorBounds} from './cutout-director';
+import type {CutoutMotionInput,CutoutMotionResult} from './cutout-motion';
+import type {CutoutRigInput,CutoutRigProposal,CutoutLayerProposal} from './cutout-rig';
+import type {CutoutRepairInput,CutoutRepairTask} from './cutout-repair';
+import type {OutputResolution} from './output-resolution';
+import type {CutoutDocument} from './cutout-studio';
+import type {UILayout} from './ui-layout';
+import type {TripoWorkspace,TripoDraft,TripoInput,TripoTask} from './tripo';
+import type {ModelAttachment} from './model-attachments';
 import type {APIBalance} from './api-balance';
 import {defaultMotionBlend,type MotionBlendTree} from './motion-blend';
 import type {MotionTimelineItem} from './motion-timeline';
 import type {TerminalWorkspace,TerminalPane,TerminalEvent,TerminalView} from './terminal';
 import type {ModelVideoInput} from './model-video';
 import type {PoseWorkspace,PoseAnalysis,MotionWorkspace,MotionExtractInput,MotionExtraction,MotionFrame,MotionClip,MotionPart,PoseJoint,SavedPose} from './pose';
-export type Provider = 'openai' | 'anthropic' | 'minimax';
+export type Provider = 'openai' | 'anthropic' | 'minimax' | 'tripo';
 export type Kind = 'image' | 'video';
-export type WorkbenchType = 'image-video'|'video-frames'|'motion-editor'|'terminal';
-export const workbenchTypes=[{id:'image-video' as WorkbenchType,name:'图片与视频创作',description:'从图片构思、生成与修改，到 MiniMax 视频创作。',features:['图片生成与编辑','图片转视频','素材上传与预览']},{id:'motion-editor' as WorkbenchType,name:'动作编辑器',description:'将 FBX 动作应用到内置基础人形，拖入时间轴混合多个动作，并导出相机视频。无需 API。',features:['Y Bot 动作映射','时间轴与动作混合','相机视频导出']},{id:'terminal' as WorkbenchType,name:'终端',description:'在 Worktree 中使用 macOS zsh，拆分独立终端，或以聊天视图查看命令与输出。',features:['原生 zsh 会话','向右拆分终端','Terminal / Chat View']}];
+export type WorkbenchType = 'image-video'|'video-frames'|'motion-editor'|'terminal'|'tripo'|'ui-layout'|'cutout-studio';
+export const workbenchTypes=[{id:'image-video' as WorkbenchType,name:'图片与视频创作',description:'从图片构思、生成与修改，到 MiniMax 视频创作。',features:['图片生成与编辑','图片转视频','素材上传与预览']},{id:'motion-editor' as WorkbenchType,name:'动作编辑器',description:'将 FBX 动作应用到内置基础人形，拖入时间轴混合多个动作，并导出相机视频。无需 API。',features:['Y Bot 动作映射','时间轴与动作混合','相机视频导出']},{id:'terminal' as WorkbenchType,name:'终端',description:'在 Worktree 中使用 macOS zsh，拆分独立终端，或以聊天视图查看命令与输出。',features:['原生 zsh 会话','向右拆分终端','Terminal / Chat View']},{id:'tripo' as WorkbenchType,name:'3D 模型生成',description:'使用 Tripo AI 从文字或参考图片生成 3D 模型，预览并下载 GLB。',features:['文字 / 图片生成 3D','三维模型预览','GLB 下载']},{id:'ui-layout' as WorkbenchType,name:'UI 布局编辑器',description:'将图形、文字与角色 Avatar 拖入画布，自由编辑并导出 JSON 和 PNG。',features:['构件拖放与自由编辑','文字 / 图层 / 属性','JSON + PNG 导出']},{id:'cutout-studio' as WorkbenchType,name:'二维角色绘制台',description:'沿参考图拆分部件、绘制与补齐隐藏结构，并用骨骼回放检查。',features:['图层 / 遮罩 / 节点','画笔与橡皮精修','骨骼回放与工程导出']}];
 export interface WorktreeInfo {id:string;name:string;createdAt:number;projectFolder?:string}
 export interface WorkbenchInfo {storage?:'app';id:string;worktreeId:string;type:WorkbenchType;name:string;createdAt:number;lastOpenedAt:number;isOpen?:boolean}
 export interface WorkbenchCatalog {types:typeof workbenchTypes;worktrees:WorktreeInfo[];workbenches:WorkbenchInfo[];projectsDirectory?:string}
@@ -28,19 +37,19 @@ export interface Settings {
 }
 export const defaults: Settings = {openaiModel:'gpt-6.1-sol',openaiReasoningEffort:'medium',openaiReasoningMode:'standard',imageModel:'gpt-image-2.5-sunburst',claudeModel:'claude-sonnet-4-5',videoModel:'MiniMax-H3',chatProvider:'openai',optimize:false,imageSize:'1024x1024',imageQuality:'medium',videoDuration:5,videoResolution:'768P',minimaxRegion:'cn'};
 export interface Asset {projectFile?:{path:string;size:number;modifiedAt:number};motionBlend?:MotionBlendTree;motionTimeline?:MotionTimelineItem[];id:string;name:string;type:'image'|'video'|'document'|'model';mime:string;size:number;url:string;createdAt:number;sourceTaskId?:string;sourceAssetId?:string;frame?:{videoId:string;sequenceId:string;index:number;time:number};imageAction?:'crop'|'edit'|'inpaint'|'remove_background';width?:number;height?:number;duration?:number;fps?:number;videoCodec?:string;audioCodec?:string;frameUrls?:string[];text?:string;warning?:string}
-export interface Draft {prompt:string;attachmentIds:string[];mode:'first_frame'|'reference'|'first_last'|'text';lastImageId?:string;baseImageId?:string;editImageId?:string;discussion:boolean}
+export interface Draft {outputResolution?:OutputResolution;prompt:string;attachmentIds:string[];mode:'first_frame'|'reference'|'first_last'|'text';lastImageId?:string;baseImageId?:string;editImageId?:string;discussion:boolean}
 export interface Message {id:string;kind:Kind;role:'user'|'assistant';text:string;createdAt:number;taskId?:string;assetIds?:string[]}
-export interface Task {id:string;requestId:string;kind:Kind;state:TaskState;createdAt:number;updatedAt:number;prompt:string;effectivePrompt?:string;assetIds:string[];baseImageId?:string;editImageId?:string;mode:Draft['mode'];lastImageId?:string;autoFrameCount?:number;discussion:boolean;settings:Settings;previewAtSubmit?:string;remoteTaskId?:string;resultUrl?:string;outputAssetIds:string[];error?:string;pollError?:string;legacySample?:boolean;imageEdit?:{sourceAssetId:string;operation:'edit'|'inpaint'|'remove_background';maskFile?:string}}
+export interface Task {cutoutRepair?:CutoutRepairTask;outputResolution?:OutputResolution;id:string;requestId:string;kind:Kind;state:TaskState;createdAt:number;updatedAt:number;prompt:string;effectivePrompt?:string;assetIds:string[];baseImageId?:string;editImageId?:string;mode:Draft['mode'];lastImageId?:string;autoFrameCount?:number;discussion:boolean;settings:Settings;previewAtSubmit?:string;remoteTaskId?:string;resultUrl?:string;outputAssetIds:string[];error?:string;pollError?:string;legacySample?:boolean;imageEdit?:{sourceAssetId:string;operation:'edit'|'inpaint'|'remove_background';maskFile?:string}}
 export interface AnimationFrame {index:number;time:number;assetId:string;originalAssetId:string;versions:string[]}
 export interface FrameSequence {id:string;requestId:string;videoId:string;count:number;status:'extracting'|'succeeded'|'failed';createdAt:number;frames:AnimationFrame[];error?:string}
 export interface FrameWorkspace {mode:'normal'|'split';frameCount:number;sequences:FrameSequence[];selectedSequenceId?:string;selectedFrameIndex?:number}
 export const defaultFrameWorkspace=():FrameWorkspace=>({mode:'normal',frameCount:20,sequences:[]});
 export function validateFrameCount(count:number){if(!Number.isInteger(count)||count<1||count>240)throw new Error('拆帧数量须为 1–240 之间的整数。');}
-export interface ModelEditorState {blendTree?:MotionBlendTree;timelineItems:MotionTimelineItem[];timelineEnabled:boolean;assetId?:string;clipIndex:number;speed:number;loop:boolean;showSkeleton:boolean;showGrid:boolean;ignoreTranslation:boolean}
+export interface ModelEditorState {attachments?:ModelAttachment[];blendTree?:MotionBlendTree;timelineItems:MotionTimelineItem[];timelineEnabled:boolean;assetId?:string;clipIndex:number;speed:number;loop:boolean;showSkeleton:boolean;showGrid:boolean;ignoreTranslation:boolean}
 export const defaultModelEditor=():ModelEditorState=>({timelineItems:[],timelineEnabled:false,clipIndex:0,speed:1,loop:true,showSkeleton:false,showGrid:true,ignoreTranslation:false});
-export interface Workspace {terminalWorkspace?:TerminalWorkspace;modelEditor?:ModelEditorState;version:1;workbenchType?:WorkbenchType;frameWorkspace?:FrameWorkspace;poseWorkspace?:PoseWorkspace;motionWorkspace?:MotionWorkspace;imageModelDefaultVersion?:1;chatModelDefaultVersion?:1;settings:Settings;assets:Asset[];messages:Message[];tasks:Task[];drafts:Record<Kind,Draft>;selectedImageId?:string;selectedVideoId?:string}
+export interface Workspace {cutoutDirector?:DirectorState;cutoutStudio?:CutoutDocument;uiLayout?:UILayout;tripoWorkspace?:TripoWorkspace;terminalWorkspace?:TerminalWorkspace;modelEditor?:ModelEditorState;version:1;workbenchType?:WorkbenchType;frameWorkspace?:FrameWorkspace;poseWorkspace?:PoseWorkspace;motionWorkspace?:MotionWorkspace;imageModelDefaultVersion?:1;chatModelDefaultVersion?:1;settings:Settings;assets:Asset[];messages:Message[];tasks:Task[];drafts:Record<Kind,Draft>;selectedImageId?:string;selectedVideoId?:string}
 export type CredentialKeys=Partial<Record<Provider,string>>&{minimaxCredits?:string};
-export interface Boot {minimaxCreditsConfigured?:boolean;workspace:Workspace;credentials:Record<Provider,boolean>;secureStorage:boolean;dataDirectory:string;desktop:boolean;workbench?:WorkbenchInfo;worktree?:WorktreeInfo}
+export interface Boot {minimaxCreditsConfigured?:boolean;workspace:Workspace;credentials:Record<Exclude<Provider,'tripo'>,boolean>&{tripo?:boolean};secureStorage:boolean;dataDirectory:string;desktop:boolean;workbench?:WorkbenchInfo;worktree?:WorktreeInfo}
 export interface ImportFile {name:string;bytes:ArrayBuffer}
 export interface GenerateInput {kind:Kind;requestId:string;draft:Draft}
 export type ImageTool='edit'|'brush'|'crop'|'remove_background';
@@ -50,6 +59,20 @@ export interface WorkspaceFile {name:string;path:string;kind:'directory'|'file'|
 export interface WorkspaceFileTree {files:WorkspaceFile[];truncated:boolean}
 export interface WorkspaceFilePreview {size:number;binary:boolean;text?:string;truncated:boolean}
 export interface Api {
+  runCutoutDirector(input:DirectorInput):Promise<DirectorState>;
+  reviewCutoutDirector(id:string,image:import('./cutout-director').DirectorPlayback,bounds:DirectorBounds):Promise<DirectorState>;
+  cancelCutoutDirector(id:string):Promise<void>;
+  dismissCutoutDirector(id:string):Promise<void>;
+  generateCutoutMotion(input:CutoutMotionInput):Promise<CutoutMotionResult>;
+  generateCutoutLayers(input:CutoutRigInput):Promise<CutoutLayerProposal>;
+  generateCutoutRig(input:CutoutRigInput):Promise<CutoutRigProposal>;
+  repairCutoutPart(input:CutoutRepairInput):Promise<Task>;reviewCutoutRepair(id:string,evidence:import('./cutout-repair').CutoutRepairEvidence):Promise<import('./cutout-repair').CutoutRepairReview>;finishCutoutRepair(id:string,stop?:boolean):Promise<void>;resolveCutoutRepair(id:string):Promise<void>;
+  exportCutoutCrop(bytes:ArrayBuffer,name:string):Promise<string|undefined>;
+  cutoutSample():Promise<ArrayBuffer>;saveCutout(document:CutoutDocument,revision:number):Promise<number>;exportCutout(bytes:ArrayBuffer,name:string):Promise<string|undefined>;
+  saveUILayout(document:UILayout):Promise<void>;openUILayout():Promise<UILayout|undefined>;exportUILayout(document:UILayout,png:ArrayBuffer):Promise<{jsonPath:string;pngPath:string}|undefined>;
+
+  saveTripoDraft(draft:TripoDraft):Promise<void>;generateTripo(input:TripoInput):Promise<TripoTask>;retryTripo(id:string):Promise<void>;selectTripo(id:string):Promise<void>;
+
   terminalSessions():Promise<TerminalPane[]>;createTerminal(afterId?:string):Promise<TerminalPane>;closeTerminal(id:string):Promise<void>;writeTerminal(id:string,data:string):Promise<void>;submitTerminal(id:string,text:string):Promise<void>;cancelCodex(id:string):Promise<void>;resizeTerminal(id:string,cols:number,rows:number):Promise<void>;setTerminalView(id:string,view:TerminalView):Promise<void>;onTerminalEvent(fn:(event:TerminalEvent)=>void):()=>void;
 
   beginModelVideo(input:ModelVideoInput):Promise<{id:string;count:number}>;appendModelVideoFrame(id:string,index:number,bytes:ArrayBuffer):Promise<void>;finishModelVideo(id:string):Promise<Asset>;cancelModelVideo(id:string):Promise<void>;

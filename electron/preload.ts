@@ -3,6 +3,14 @@ import type {Api} from '../src/shared/types';
 function createAPI(workbenchId?:string):Api{
   const scoped=(name:string,...args:any[])=>ipcRenderer.invoke(name,{workbenchId,args});
   return {
+    runCutoutDirector:i=>scoped('cutout:director',i),reviewCutoutDirector:(id,image,bounds)=>scoped('cutout:director-review',id,image,bounds),cancelCutoutDirector:id=>scoped('cutout:director-cancel',id),dismissCutoutDirector:id=>scoped('cutout:director-dismiss',id),
+    generateCutoutMotion:i=>scoped('cutout:motion',i),
+    generateCutoutLayers:i=>scoped('cutout:layers',i),
+    generateCutoutRig:i=>scoped('cutout:rig',i),
+    repairCutoutPart:i=>scoped('cutout:repair',i),reviewCutoutRepair:(id,e)=>scoped('cutout:repair-review',id,e),finishCutoutRepair:(id,stop)=>scoped('cutout:repair-finish',id,stop),resolveCutoutRepair:id=>scoped('cutout:repair-resolve',id),
+    exportCutoutCrop:(b,n)=>scoped('cutout:crop-export',b,n),cutoutSample:()=>scoped('cutout:sample'),saveCutout:(d,r)=>scoped('cutout:save',d,r),exportCutout:(b,n)=>scoped('cutout:export',b,n),
+    saveUILayout:d=>scoped('ui-layout:save',d),openUILayout:()=>scoped('ui-layout:open'),exportUILayout:(d,png)=>scoped('ui-layout:export',d,png),
+    saveTripoDraft:d=>scoped('tripo:draft',d),generateTripo:i=>scoped('tripo:generate',i),retryTripo:id=>scoped('tripo:retry',id),selectTripo:id=>scoped('tripo:select',id),
     terminalSessions:()=>scoped('terminal:list'),createTerminal:id=>scoped('terminal:create',id),closeTerminal:id=>scoped('terminal:close',id),writeTerminal:(id,data)=>scoped('terminal:write',id,data),submitTerminal:(id,text)=>scoped('terminal:submit',id,text),cancelCodex:id=>scoped('terminal:codex-cancel',id),resizeTerminal:(id,cols,rows)=>scoped('terminal:resize',id,cols,rows),setTerminalView:(id,view)=>scoped('terminal:view',id,view),onTerminalEvent:fn=>{const listener=(_event:unknown,event:any)=>{if(!workbenchId||event.workbenchId===workbenchId)fn(event);};ipcRenderer.on('terminal:event',listener);return()=>ipcRenderer.removeListener('terminal:event',listener);},
 baseModelData:()=>scoped('model:base'),beginModelVideo:input=>scoped('model-video:begin',input),appendModelVideoFrame:(id,index,bytes)=>scoped('model-video:frame',id,index,bytes),finishModelVideo:id=>scoped('model-video:finish',id),cancelModelVideo:id=>scoped('model-video:cancel',id),modelData:id=>scoped('model:data',id),saveModelEditor:state=>scoped('model:save',state),saveModelBlend:input=>scoped('model:blend',input),saveModelSegment:input=>scoped('model:segment',input),renameModel:(id,name)=>scoped('model:rename',id,name),deleteModel:id=>scoped('model:delete',id),
     editPose:(id,j)=>scoped('pose:edit',id,j),resetPose:()=>scoped('pose:reset'),savePoseSnapshot:name=>scoped('pose:save',name),loadPoseSnapshot:id=>scoped('pose:load',id),

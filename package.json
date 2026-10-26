@@ -1,6 +1,6 @@
 {
   "name": "ai-assets-toolkit",
-  "version": "0.8.12",
+  "version": "0.10.29",
   "private": true,
   "description": "AI game creation workbench",
   "main": "dist-electron/main.cjs",

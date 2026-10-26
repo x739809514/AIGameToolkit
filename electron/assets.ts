@@ -7,13 +7,19 @@ import ffmpeg from 'ffmpeg-static';
 import ffprobe from 'ffprobe-static';
 import pdf from 'pdf-parse/lib/pdf-parse.js';
 import { readPNG } from './image-processing';
+import {outputFilter,validateOutputResolution,type OutputResolution} from '../src/shared/output-resolution';
 import {validateFrameCount} from '../src/shared/types';
 import type { Asset } from '../src/shared/types';
 const exec=promisify(execFile);
 const executable=(p:string)=>p.replace('app.asar/','app.asar.unpacked/');
 export function inspectFile(name:string,b:Buffer,maxMB=50){
   const ext=extname(name).toLowerCase();let mime='';let type:Asset['type']='document';
-  if(ext==='.fbx'&&(b.subarray(0,23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0','binary'))||/^\s*;\s*FBX[\s\S]*FBXHeaderExtension:/.test(b.toString('utf8',0,4096)))){mime='application/vnd.autodesk.fbx';type='model';}
+  if(ext==='.glb'&&b.length>=20&&b.toString('ascii',0,4)==='glTF'&&b.readUInt32LE(4)===2&&b.readUInt32LE(8)===b.length){
+    const length=b.readUInt32LE(12);if(length%4||20+length>b.length||b.readUInt32LE(16)!==0x4e4f534a)throw new Error('GLB 文件结构不完整。');
+    try{const data=JSON.parse(b.toString('utf8',20,20+length));if(data.asset?.version!=='2.0')throw new Error();}catch{throw new Error('GLB 模型描述无效。');}
+    mime='model/gltf-binary';type='model';
+  }
+  else if(ext==='.fbx'&&(b.subarray(0,23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0','binary'))||/^\s*;\s*FBX[\s\S]*FBXHeaderExtension:/.test(b.toString('utf8',0,4096)))){mime='application/vnd.autodesk.fbx';type='model';}
   else if(b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))){mime='image/png';type='image';}
   else if(b[0]===255&&b[1]===216&&b[2]===255){mime='image/jpeg';type='image';}
   else if(b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP'){mime='image/webp';type='image';}
@@ -22,6 +28,7 @@ export function inspectFile(name:string,b:Buffer,maxMB=50){
   else if(['.txt','.md','.markdown'].includes(ext)&&!b.includes(0)){mime='text/plain';}
   else throw new Error(`${name}：仅支持 PNG/JPEG/WebP、MP4/MOV、TXT/Markdown/PDF 或 FBX。`);
   if(ext==='.fbx'&&type!=='model')throw new Error(`${name}：不是有效的 FBX 文件。`);
+  if(ext==='.glb'&&mime!=='model/gltf-binary')throw new Error(`${name}：不是有效的 GLB 文件。`);
   if(!b.length||b.length>maxMB*1024*1024)throw new Error(`${name}：文件须小于 ${maxMB} MB。`);
   return {mime,type};
 }
@@ -60,6 +67,22 @@ export class Assets {
     const image=readPNG(bytes);if(image.width===width&&image.height===height)return bytes;
     const source=join(this.directory,`${id}-result.png`),target=join(this.directory,`${id}-resized.png`);writeFileSync(source,bytes);
     await this.exec(executable(ffmpeg!),['-y','-i',source,'-vf',`scale=${width}:${height}:flags=lanczos`,'-frames:v','1','-pix_fmt','rgba',target],{timeout:30000,maxBuffer:1024*1024});return readFileSync(target);
+  }
+  async fitOutput(bytes:Buffer,kind:'image'|'video',target:OutputResolution){
+    this.assertOpen();validateOutputResolution(target);
+    const directory=join(this.directory,`output-${randomUUID()}`);mkdirSync(directory,{recursive:true});
+    const source=join(directory,kind==='image'?'source.png':'source.mp4'),result=join(directory,kind==='image'?'result.png':'result.mp4');
+    try{
+      writeFileSync(source,bytes);
+      const args=['-y','-v','error','-i',source,'-map','0:v:0','-vf',outputFilter(target)];
+      if(kind==='image')args.push('-frames:v','1','-pix_fmt','rgba');
+      else args.push('-map','0:a?','-c:v','libx264','-preset','fast','-crf','18','-pix_fmt',target.width%2||target.height%2?'yuv444p':'yuv420p','-c:a','aac','-movflags','+faststart');
+      await this.exec(executable(ffmpeg!),[...args,result],{timeout:600000,maxBuffer:1024*1024});
+      const {stdout}=await this.exec(executable(ffprobe.path),['-v','error','-select_streams','v:0','-show_entries','stream=width,height,sample_aspect_ratio','-of','json',result],{timeout:20000,maxBuffer:1024*1024});
+      const video=JSON.parse(stdout).streams?.[0];
+      if(video?.width!==target.width||video?.height!==target.height||video.sample_aspect_ratio!=='1:1')throw new Error('输出尺寸校验失败，未保存不符合目标尺寸的结果。');
+      const output=readFileSync(result);if(output.length>200*1024*1024)throw new Error('适配后的媒体超过 200 MB，请降低目标尺寸。');return output;
+    }finally{rmSync(directory,{recursive:true,force:true});}
   }
   async extractFrames(video:Asset,count:number,sequenceId:string):Promise<Asset[]>{
     this.assertOpen();
@@ -115,4 +138,4 @@ export class Assets {
   }
 
 }
-export const extension=(mime:string)=>({'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','video/mp4':'.mp4','video/quicktime':'.mov','application/pdf':'.pdf','text/plain':'.txt','application/vnd.autodesk.fbx':'.fbx'}[mime]||'.bin');
+export const extension=(mime:string)=>({'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','video/mp4':'.mp4','video/quicktime':'.mov','application/pdf':'.pdf','text/plain':'.txt','application/vnd.autodesk.fbx':'.fbx','model/gltf-binary':'.glb'}[mime]||'.bin');

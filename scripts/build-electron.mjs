@@ -9,3 +9,5 @@ await build({entryPoints:['electron/model-self-test.ts'],outfile:'dist-electron/
 await mkdir('dist-electron/assets',{recursive:true});await copyFile('assets/models/y-bot.fbx','dist-electron/assets/y-bot.fbx');
 
 await copyFile('electron/fbx-segment.py','dist-electron/assets/fbx-segment.py');
+
+await copyFile('assets/skeletal2d/sample.laputa2d.zip','dist-electron/assets/sample.laputa2d.zip');

@@ -4,7 +4,7 @@ import {balanceProviders,balanceProviderInfo,formatAPIBalance,type APIBalance} f
 import type {Provider} from '../shared/types';
 import {useWorkbenchAPI} from './workbench-api';
 
-export function APIBalanceMenu({credentials,revision}:{credentials:Record<Provider,boolean>;revision:string}){
+export function APIBalanceMenu({credentials,revision}:{credentials:Partial<Record<Provider,boolean>>;revision:string}){
  const api=useWorkbenchAPI(),[open,setOpen]=useState(false),[balances,setBalances]=useState<APIBalance[]>([]),[loading,setLoading]=useState(false),[error,setError]=useState(''),[loginOpening,setLoginOpening]=useState(false),[loginError,setLoginError]=useState('');
  const root=useRef<HTMLDivElement>(null),trigger=useRef<HTMLButtonElement>(null),sequence=useRef(0);
  useEffect(()=>api.onBalancesChanged(()=>{void refresh();}),[api]);

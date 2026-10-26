@@ -1,3 +1,15 @@
+import {CutoutDirector} from './cutout-director';
+import {generateCutoutMotion} from './cutout-motion';
+import {validateCutoutMotionDraft,canAnimateCutout,type CutoutMotionInput} from '../src/shared/cutout-motion';
+import {generateCutoutRig,generateCutoutLayers} from './cutout-rig';
+import type {CutoutRigInput,CutoutRigProposal,CutoutLayerProposal} from '../src/shared/cutout-rig';
+import {submitCutoutRepair,prepareContextRepair,reviewContextRepair,guardRepair} from './cutout-repair';
+import type {CutoutRepairInput} from '../src/shared/cutout-repair';
+import {validateOutputResolution,imageGenerationSize} from '../src/shared/output-resolution';
+import {validateCutoutDocument,type CutoutDocument} from '../src/shared/cutout-studio';
+import {validateUILayout,type UILayout} from '../src/shared/ui-layout';
+import {Tripo} from './tripo';
+import {normalizeModelAttachments} from '../src/shared/model-attachments';
 import {CompletionTracker,type TaskCompletion} from './task-notifications';
 import {apiBalanceReader} from './api-balance';
 import {motionName} from './fbx-segment';
@@ -8,7 +20,7 @@ import {Motions} from './motions';
 import {analyzePose as requestPose} from './pose';
 import type {PoseAnalysis} from '../src/shared/pose';
 import { existsSync } from 'node:fs';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { cropPNG, validateMask, readPNG, compositeSelection, hasTransparency } from './image-processing';
 import { randomUUID } from 'node:crypto';
@@ -20,15 +32,73 @@ import { Assets } from './assets';
 import * as provider from './providers';
 export interface Vault {getMiniMaxCreditsKey?:()=>string|undefined;setMiniMaxCreditsKey?:(value:string)=>void;get(p:Provider):string|undefined;set(p:Provider,value:string):void;secure:boolean}
 export class Service {
+  director=new CutoutDirector(this);
+  get cutoutAIActive(){return this.cutoutRigGenerating;}
   private completionTracker:CompletionTracker;
+  tripo=new Tripo(this);
   lifecycle=new AbortController();workspace:Workspace;assets:Assets;modelVideo=new ModelVideoExporter(this);motions=new Motions(this);timers=new Map<string,ReturnType<typeof setTimeout>>();polling=new Set<string>();saving=new Set<string>();closed=false;localOperations=0;modelFileJobs=new Set<()=>void>();deletingImageIds=new Set<string>();deletingModelIds=new Set<string>();
-  constructor(public store:Store,public vault:Vault,public onChange:(w:Workspace)=>void,public onComplete:(event:TaskCompletion)=>void=()=>{}){this.workspace=store.load();this.assets=new Assets(store.directory+'/assets');let interrupted=false;for(const pane of this.workspace.terminalWorkspace?.panes||[])for(const message of pane.messages)if(message.running){message.running=false;message.text+='\n[上次终端会话已结束]';interrupted=true;}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='应用在拆帧期间退出，请重新拆帧。';interrupted=true;}if(this.workspace.poseWorkspace?.analysis?.status==='analyzing'){this.workspace.poseWorkspace.analysis.status='failed';this.workspace.poseWorkspace.analysis.error='应用在解析期间退出，请重新解析。';interrupted=true;}if(this.workspace.motionWorkspace?.extraction?.status==='extracting'){this.workspace.motionWorkspace.extraction.status='failed';this.workspace.motionWorkspace.extraction.error='应用在提取期间退出，请重新提取。';interrupted=true;}if(interrupted)this.store.save(this.workspace);this.completionTracker=new CompletionTracker(this.workspace,event=>this.completed(event));}
-  boot():Boot{return {workspace:structuredClone(this.workspace),credentials:{openai:!!this.vault.get('openai'),anthropic:!!this.vault.get('anthropic'),minimax:!!this.vault.get('minimax')},minimaxCreditsConfigured:!!this.vault.getMiniMaxCreditsKey?.(),secureStorage:this.vault.secure,dataDirectory:this.store.directory,desktop:true};}
+  constructor(public store:Store,public vault:Vault,public onChange:(w:Workspace)=>void,public onComplete:(event:TaskCompletion)=>void=()=>{}){this.workspace=store.load();this.assets=new Assets(store.directory+'/assets');let interrupted=false;for(const t of this.workspace.tasks){if(t.cutoutRepair?.review?.status==='reviewing'){t.cutoutRepair.review={status:'failed',summary:'上次补画回看已中断，可继续检查。'};interrupted=true;}}if(this.workspace.cutoutDirector?.run?.status==='running'){this.workspace.cutoutDirector.run.status='failed';this.workspace.cutoutDirector.run.progress='上次制作已中断';this.workspace.cutoutDirector.run.error='应用在 AI 制作期间退出。已保存候选可继续预览；发送新要求重新开始。';interrupted=true;}for(const pane of this.workspace.terminalWorkspace?.panes||[])for(const message of pane.messages)if(message.running){message.running=false;message.text+='\n[上次终端会话已结束]';interrupted=true;}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='应用在拆帧期间退出，请重新拆帧。';interrupted=true;}if(this.workspace.poseWorkspace?.analysis?.status==='analyzing'){this.workspace.poseWorkspace.analysis.status='failed';this.workspace.poseWorkspace.analysis.error='应用在解析期间退出，请重新解析。';interrupted=true;}if(this.workspace.motionWorkspace?.extraction?.status==='extracting'){this.workspace.motionWorkspace.extraction.status='failed';this.workspace.motionWorkspace.extraction.error='应用在提取期间退出，请重新提取。';interrupted=true;}if(interrupted)this.store.save(this.workspace);this.completionTracker=new CompletionTracker(this.workspace,event=>this.completed(event));}
+  saveUILayout(document:UILayout){if(this.closed)throw new Error('工作台已关闭。');if(this.workspace.workbenchType!=='ui-layout')throw new Error('请在 UI 布局编辑器中保存。');this.workspace.uiLayout=validateUILayout(document);this.changed();}
+  private cutoutImageSizes=new Map<string,{width:number;height:number}>();
+  saveCutout(document:CutoutDocument,revision:number){
+    if(this.closed||this.workspace.workbenchType!=='cutout-studio')throw new Error('请在二维角色绘制台保存。');
+    const valid=validateCutoutDocument(document),previous=this.workspace.cutoutStudio?.revision??0;
+    if(revision!==previous)throw new Error('工程已被另一窗口更新，请先导出当前草稿，再重新打开工作台。');
+    const sizes=new Map<string,{width:number;height:number}>();
+    const dimensions=(bitmap:string)=>{let size=sizes.get(bitmap)??this.cutoutImageSizes.get(bitmap);if(!size){const image=readPNG(Buffer.from(bitmap.split(',')[1],'base64'));size={width:image.width,height:image.height};}sizes.set(bitmap,size);return size;};
+    if(valid.reference){const image=dimensions(valid.reference.bitmap);if(image.width!==valid.rig.canvas[0]||image.height!==valid.rig.canvas[1])throw new Error('参考原图与画布尺寸不符。');}
+    for(const a of valid.artwork){const image=dimensions(a.bitmap),part=valid.rig.parts.find(p=>p.id===a.partId)!;if(image.width!==part.crop[2]||image.height!==part.crop[3])throw new Error('图层 PNG 与部件尺寸不符。');for(const v of a.variants??[]){const size=dimensions(v.bitmap);if(size.width>4096||size.height>4096)throw Error('替换图 PNG 超过4096px。');}}
+    this.cutoutImageSizes=sizes;
+    const next={...structuredClone(valid),revision:previous+1};this.workspace.cutoutStudio=next;this.changed();return next.revision;
+  }
+  async generateCutoutMotion(input:CutoutMotionInput){
+    if(this.closed||this.workspace.workbenchType!=='cutout-studio'||this.workspace.cutoutStudio?.workflowStage!=='motion')throw Error('请在 AI 生成动作阶段生成。');
+    validateCutoutMotionDraft(input);if(!input.prompt.trim())throw Error('请填写动作描述。');
+    if(this.cutoutRigGenerating||this.director.busy)throw Error('AI 正在生成，请勿重复提交。');
+    const d=structuredClone(this.workspace.cutoutStudio);
+    if(input.revision!==d.revision)throw Error('请先保存当前工程再生成动作。');
+    if(!canAnimateCutout(d.rig))throw Error('请先为部件绑定可转动的骨骼。');
+    if(d.rig.clips.length>=32)throw Error('动作已达32个，请先删除不用的动作。');
+    this.validateCutoutAssemblyImages(input,d);
+    this.cutoutRigGenerating=true;
+    try{return await this.localOperation(()=>generateCutoutMotion({...this.workspace.settings},this.key('openai'),input,d));}finally{this.cutoutRigGenerating=false;}
+  }
+  private validateCutoutAssemblyImages(input:CutoutRigInput,d:CutoutDocument){
+    if(typeof input.image!=='string'||input.image.length>24_000_000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(input.image))throw Error('装配参考图无效。');
+    const png=readPNG(Buffer.from(input.image.split(',')[1],'base64'));if(png.width!==d.rig.canvas[0]||png.height!==d.rig.canvas[1])throw Error('装配图尺寸与画布不符。');
+    if(input.atlas!==undefined){if(typeof input.atlas!=='string'||input.atlas.length>8_000_000||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(input.atlas))throw Error('部件图集无效。');const atlas=readPNG(Buffer.from(input.atlas.split(',')[1],'base64'));if(atlas.width>2048||atlas.height>2048)throw Error('部件图集超过尺寸限制。');}
+  }
+  private cutoutRigGenerating=false;
+  generateCutoutRig(input:CutoutRigInput){return this.analyzeCutoutAssembly(input,false);}
+  generateCutoutLayers(input:CutoutRigInput){return this.analyzeCutoutAssembly(input,true);}
+  private async analyzeCutoutAssembly<T extends boolean>(input:CutoutRigInput,layers:T):Promise<T extends true?CutoutLayerProposal:CutoutRigProposal>{
+    if(this.closed||this.workspace.workbenchType!=='cutout-studio'||!this.workspace.cutoutStudio)throw Error('请在二维角色绘制台生成骨骼。');
+    if(this.cutoutRigGenerating||this.director.busy)throw Error('骨骼正在生成，请勿重复提交。');
+    const d=structuredClone(this.workspace.cutoutStudio);
+    if(input.revision!==d.revision||!d.rig.parts.length)throw Error('请先保存当前部件再生成骨骼。');
+    this.validateCutoutAssemblyImages(input,d);
+    this.cutoutRigGenerating=true;
+    try{return await this.localOperation<CutoutLayerProposal|CutoutRigProposal>(()=>(layers?generateCutoutLayers:generateCutoutRig)({...this.workspace.settings},this.key('openai'),input.image,d.rig,JSON.stringify({canvas:d.rig.canvas,parts:d.rig.parts.map((p,index)=>({partId:p.id,atlasIndex:index+1,z:p.z,name:d.artwork.find(a=>a.partId===p.id)!.name,crop:p.crop,offset:p.offset??[0,0]}))}),input.atlas)) as T extends true?CutoutLayerProposal:CutoutRigProposal;}finally{this.cutoutRigGenerating=false;}
+  }
+  resolveCutoutRepair(id:string){const task=this.workspace.tasks.find(t=>t.id===id);if(this.closed||this.workspace.workbenchType!=='cutout-studio'||!task?.cutoutRepair||task.state!=='submission_unknown')throw Error('仅可结束本工作台提交状态待核实的补画任务。');this.update(task,{state:'cancelled',error:'用户已结束本地跟踪。未重发请求；已提交的远程生成仍可能继续。'});}
+  reviewCutoutRepair(id:string,evidence:import('../src/shared/cutout-repair').CutoutRepairEvidence){return this.localOperation(()=>reviewContextRepair(this,id,evidence));}
+  finishCutoutRepair(id:string,stop=false){
+    if(this.closed||this.workspace.workbenchType!=='cutout-studio')throw Error('请在二维角色工作台操作补画。');
+    const t=this.workspace.tasks.find(t=>t.id===id),request=this.workspace.cutoutDirector?.repairRequest;
+    if(!t?.cutoutRepair){if(request?.id!==id||request.taskId)throw Error('补画任务不存在。');this.workspace.cutoutDirector!.repairRequest=undefined;this.changed();return;}
+    const partId=t.cutoutRepair.partId;
+    for(const item of this.workspace.tasks){const r=item.cutoutRepair;if(r?.partId!==partId)continue;if(stop){if(item.id===id||r.retryOf===id||item.id===t.cutoutRepair.retryOf)r.stopped=true;}else{r.dismissed=true;r.stopped=true;}}
+    if(!stop&&request?.partId===partId)this.workspace.cutoutDirector!.repairRequest=undefined;
+    this.changed();
+  }
+  private cutoutRepairSubmitting=false;
+  async repairCutoutPart(input:CutoutRepairInput){if(this.cutoutRepairSubmitting)throw Error('正在准备补画任务，请勿重复提交。');this.cutoutRepairSubmitting=true;try{return await this.localOperation(()=>submitCutoutRepair(this,input));}finally{this.cutoutRepairSubmitting=false;}}
+  boot():Boot{return {workspace:structuredClone(this.workspace),credentials:{openai:!!this.vault.get('openai'),anthropic:!!this.vault.get('anthropic'),minimax:!!this.vault.get('minimax'),tripo:!!this.vault.get('tripo')},minimaxCreditsConfigured:!!this.vault.getMiniMaxCreditsKey?.(),secureStorage:this.vault.secure,dataDirectory:this.store.directory,desktop:true};}
   completed(event:TaskCompletion){if(!this.closed){try{this.onComplete(event);}catch{}}}
   changed(){if(this.closed)return;this.store.save(this.workspace);if(!this.closed){this.onChange(structuredClone(this.workspace));this.completionTracker.observe(this.workspace);}}
-  assertAI(){if(this.closed)throw new Error('工作台已关闭。');if(this.workspace.workbenchType==='motion-editor')throw new Error('动作编辑器为本地工作台，不接入 AI。');if(this.workspace.workbenchType==='terminal')throw new Error('终端工作台通过本地 Shell 操作。');}
-  modelData(id:string){if(this.deletingModelIds.has(id))throw new Error('动作正在删除。');if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中打开 FBX。');const asset=this.workspace.assets.find(a=>a.id===id&&a.type==='model');if(!asset)throw new Error('FBX 素材不存在。');const bytes=this.assets.bytes(asset);return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;}
-  saveModelEditor(state:ModelEditorState){if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存。');if(state.assetId&&!this.workspace.assets.some(a=>a.id===state.assetId&&a.type==='model'))throw new Error('模型不存在。');if(!Number.isInteger(state.clipIndex)||state.clipIndex<0||state.clipIndex>10000||![.25,.5,1,1.5,2].includes(state.speed)||[state.loop,state.showSkeleton,state.showGrid,state.ignoreTranslation??false].some(v=>typeof v!=='boolean'))throw new Error('动作播放参数不合法。');const timelineItems=normalizeMotionTimeline(state.timelineItems??[],id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(typeof (state.timelineEnabled??false)!=='boolean')throw new Error('时间轴模式不合法。');const blendTree=normalizeMotionBlend(state.blendTree??defaultMotionBlend(),id=>this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(blendTree.enabled&&state.timelineEnabled)throw new Error('请选择时间轴或混合树作为当前预览。');this.workspace.modelEditor={blendTree,timelineItems,timelineEnabled:(state.timelineEnabled??false)&&timelineItems.length>0,assetId:state.assetId,clipIndex:state.clipIndex,speed:state.speed,loop:state.loop,showSkeleton:state.showSkeleton,showGrid:state.showGrid,ignoreTranslation:state.ignoreTranslation??false};this.changed();}
+  assertAI(){if(this.closed)throw new Error('工作台已关闭。');if(this.workspace.workbenchType==='motion-editor')throw new Error('动作编辑器为本地工作台，不接入 AI。');if(this.workspace.workbenchType==='ui-layout')throw new Error('UI 布局编辑器为本地工作台，不接入 AI。');if(this.workspace.workbenchType==='terminal')throw new Error('终端工作台通过本地 Shell 操作。');}
+  modelData(id:string){if(this.deletingModelIds.has(id))throw new Error('动作正在删除。');if(!['motion-editor','tripo'].includes(this.workspace.workbenchType||''))throw new Error('请在三维工作台中打开模型。');const asset=this.workspace.assets.find(a=>a.id===id&&a.type==='model');if(!asset||this.workspace.workbenchType==='tripo'&&asset.mime!=='model/gltf-binary')throw new Error('模型素材不存在。');const bytes=this.assets.bytes(asset);return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength) as ArrayBuffer;}
+  saveModelEditor(state:ModelEditorState){if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存。');if(state.assetId&&!this.workspace.assets.some(a=>a.id===state.assetId&&a.type==='model'))throw new Error('模型不存在。');if(!Number.isInteger(state.clipIndex)||state.clipIndex<0||state.clipIndex>10000||![.25,.5,1,1.5,2].includes(state.speed)||[state.loop,state.showSkeleton,state.showGrid,state.ignoreTranslation??false].some(v=>typeof v!=='boolean'))throw new Error('动作播放参数不合法。');const timelineItems=normalizeMotionTimeline(state.timelineItems??[],id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(typeof (state.timelineEnabled??false)!=='boolean')throw new Error('时间轴模式不合法。');const blendTree=normalizeMotionBlend(state.blendTree??defaultMotionBlend(),id=>this.workspace.assets.some(a=>a.id===id&&a.type==='model'));if(blendTree.enabled&&state.timelineEnabled)throw new Error('请选择时间轴或混合树作为当前预览。');const attachments=normalizeModelAttachments(state.attachments??[],id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model'));this.workspace.modelEditor={attachments,blendTree,timelineItems,timelineEnabled:(state.timelineEnabled??false)&&timelineItems.length>0,assetId:state.assetId,clipIndex:state.clipIndex,speed:state.speed,loop:state.loop,showSkeleton:state.showSkeleton,showGrid:state.showGrid,ignoreTranslation:state.ignoreTranslation??false};this.changed();}
   async saveModelBlend(input:{tree:MotionBlendTree;name:string;bytes:ArrayBuffer}){
     if(this.workspace.workbenchType!=='motion-editor')throw new Error('请在动作编辑器中保存混合动作。');
     const tree=normalizeMotionBlend(input.tree,id=>!this.deletingModelIds.has(id)&&this.workspace.assets.some(a=>a.id===id&&a.type==='model')),name=motionName(input.name);
@@ -48,26 +118,26 @@ export class Service {
     this.deletingModelIds.add(id);
     try{await this.localOperation(async()=>{const path=this.assets.path(asset);if(existsSync(path))await trashFile(path);
       this.workspace.assets=this.workspace.assets.filter(a=>a.id!==id);
-      const state=this.workspace.modelEditor;if(state){state.timelineItems=normalizeMotionTimeline((state.timelineItems??[]).filter(item=>item.assetId!==id));state.timelineEnabled=!!state.timelineEnabled&&state.timelineItems.length>0;if(state.blendTree){state.blendTree.nodes=state.blendTree.nodes.filter(node=>node.assetId!==id);state.blendTree.enabled=state.blendTree.enabled&&state.blendTree.nodes.length>0;}if(state.assetId===id){state.assetId=this.workspace.assets.find(a=>a.type==='model')?.id;state.clipIndex=0;}}
+      const state=this.workspace.modelEditor;if(state){state.attachments=(state.attachments??[]).filter(item=>item.assetId!==id);state.timelineItems=normalizeMotionTimeline((state.timelineItems??[]).filter(item=>item.assetId!==id));state.timelineEnabled=!!state.timelineEnabled&&state.timelineItems.length>0;if(state.blendTree){state.blendTree.nodes=state.blendTree.nodes.filter(node=>node.assetId!==id);state.blendTree.enabled=state.blendTree.enabled&&state.blendTree.nodes.length>0;}if(state.assetId===id){state.assetId=this.workspace.assets.find(a=>a.type==='model')?.id;state.clipIndex=0;}}
       this.changed();
     });}finally{this.deletingModelIds.delete(id);}
   }
-  key(p:Provider){this.assertAI();const k=this.vault.get(p);if(!k)throw new Error(`请先在设置中配置 ${p==='openai'?'OpenAI':p==='anthropic'?'Claude':'MiniMax'} API Key。`);return k;}
+  key(p:Provider){this.assertAI();const k=this.vault.get(p);if(!k)throw new Error(`请先在设置中配置 ${p==='openai'?'OpenAI':p==='anthropic'?'Claude':p==='tripo'?'Tripo':'MiniMax'} API Key。`);return k;}
   saveSettings(s:Settings,keys:CredentialKeys){
     validateReasoningSettings(s);
     if(s.minimaxRegion!=='cn')throw new Error('当前版本使用 MiniMax 中国区 API，请使用中国区配置。');
     if(!s.openaiModel.trim()||!s.imageModel.trim()||!s.claudeModel.trim())throw new Error('模型 ID 不能为空。');
     if(!['openai','anthropic'].includes(s.chatProvider)||!['MiniMax-H3','MiniMax-H3-Max'].includes(s.videoModel))throw new Error('不支持的供应商或视频模型。');
     if(!['1024x1024','1536x1024','1024x1536','auto'].includes(s.imageSize)||!['low','medium','high','auto'].includes(s.imageQuality))throw new Error('图片参数不支持。');
-    for(const p of ['openai','anthropic','minimax'] as Provider[])if(typeof keys[p]==='string')this.vault.set(p,keys[p]!.trim());
+    for(const p of ['openai','anthropic','minimax','tripo'] as Provider[])if(typeof keys[p]==='string')this.vault.set(p,keys[p]!.trim());
     if(typeof keys.minimaxCredits==='string'){if(!this.vault.setMiniMaxCreditsKey)throw new Error('积分查询凭据存储不可用。');this.vault.setMiniMaxCreditsKey(keys.minimaxCredits.trim());}
     this.workspace.settings={...s};this.changed();return this.boot();
   }
   apiBalances(force=false){return apiBalanceReader(this.vault).read(this.workspace.settings.minimaxRegion,force===true);}
   async testConnection(p:Provider){return provider.testConnection(p,this.key(p),this.workspace.settings.minimaxRegion);}
-  saveDraft(kind:Kind,draft:Draft){this.assertKind(kind);this.assertDraft(draft);this.workspace.drafts[kind]=structuredClone(draft);this.changed();}
+  saveDraft(kind:Kind,draft:Draft){this.assertKind(kind);this.assertDraft(draft,false);this.workspace.drafts[kind]=structuredClone(draft);this.changed();}
   assertKind(k:string){if(!['image','video'].includes(k))throw new Error('会话不存在。');}
-  assertDraft(d:Draft){if(typeof d.prompt!=='string'||d.prompt.length>30000||!Array.isArray(d.attachmentIds)||d.attachmentIds.length>12||!['first_frame','reference','first_last','text'].includes(d.mode))throw new Error('草稿格式不合法。');for(const id of [...d.attachmentIds,d.baseImageId,d.lastImageId,d.editImageId].filter(Boolean)){if(this.deletingImageIds.has(id!))throw new Error('此图片正在删除，请重新选择素材。');if(!this.workspace.assets.some(a=>a.id===id))throw new Error('素材不存在。');}}
+  assertDraft(d:Draft,validateOutput=true){if(validateOutput)validateOutputResolution(d.outputResolution);if(typeof d.prompt!=='string'||d.prompt.length>30000||!Array.isArray(d.attachmentIds)||d.attachmentIds.length>12||!['first_frame','reference','first_last','text'].includes(d.mode))throw new Error('草稿格式不合法。');for(const id of [...d.attachmentIds,d.baseImageId,d.lastImageId,d.editImageId].filter(Boolean)){if(this.deletingImageIds.has(id!))throw new Error('此图片正在删除，请重新选择素材。');if(!this.workspace.assets.some(a=>a.id===id))throw new Error('素材不存在。');}}
   async localOperation<T>(fn:()=>Promise<T>):Promise<T>{if(this.closed)throw new Error('工作台已关闭。');this.localOperations++;try{const result=await fn();if(this.closed)throw new Error('工作台已关闭，任务已取消。');return result;}finally{this.localOperations--;}}
   async importFiles(files:ImportFile[]){return this.localOperation(async()=>{if(files.length>12)throw new Error('一次最多上传 12 个文件。');const imported:Asset[]=[];for(const f of files){if(this.workspace.workbenchType==='motion-editor'&&!/\.fbx$/i.test(f.name))throw new Error('动作编辑器仅支持 FBX 文件。');if(this.workspace.workbenchType!=='motion-editor'&&/\.fbx$/i.test(f.name))throw new Error('请在动作编辑器中导入 FBX。');const a=await this.assets.import(f.name,Buffer.from(f.bytes));this.workspace.assets.push(a);imported.push(a);this.changed();}return imported;});}
   select(kind:Kind,id:string){this.assertKind(kind);if(!this.workspace.assets.some(a=>a.id===id&&a.type===kind))throw new Error('素材不存在。');if(kind==='image')this.workspace.selectedImageId=id;else this.workspace.selectedVideoId=id;this.changed();}
@@ -140,7 +210,8 @@ export class Service {
     const duplicate=this.workspace.tasks.find(t=>t.requestId===input.requestId);if(duplicate)return structuredClone(duplicate);
     if(this.workspace.tasks.some(t=>t.kind===input.kind&&isBusy(t)))throw new Error('这个窗口已有生成任务，请等待完成。');
     const d=structuredClone(input.draft);if(!d.prompt.trim())throw new Error('请先输入 prompt。');
-    const task:Task={id:randomUUID(),requestId:input.requestId,kind:input.kind,state:'preparing',createdAt:Date.now(),updatedAt:Date.now(),prompt:d.prompt.trim(),assetIds:d.attachmentIds,baseImageId:d.baseImageId,lastImageId:d.lastImageId,autoFrameCount:input.kind==='video'&&this.workspace.workbenchType==='video-frames'?this.frameState().frameCount:undefined,editImageId:d.editImageId,mode:d.mode,discussion:d.discussion,settings:{...this.workspace.settings},previewAtSubmit:input.kind==='image'?this.workspace.selectedImageId:this.workspace.selectedVideoId,outputAssetIds:[]};
+    const task:Task={id:randomUUID(),requestId:input.requestId,kind:input.kind,outputResolution:d.outputResolution,state:'preparing',createdAt:Date.now(),updatedAt:Date.now(),prompt:d.prompt.trim(),assetIds:d.attachmentIds,baseImageId:d.baseImageId,lastImageId:d.lastImageId,autoFrameCount:input.kind==='video'&&this.workspace.workbenchType==='video-frames'?this.frameState().frameCount:undefined,editImageId:d.editImageId,mode:d.mode,discussion:d.discussion,settings:{...this.workspace.settings},previewAtSubmit:input.kind==='image'?this.workspace.selectedImageId:this.workspace.selectedVideoId,outputAssetIds:[]};
+    if(task.kind==='image'&&task.outputResolution)task.settings.imageSize=imageGenerationSize(task.outputResolution);
     const assets=this.taskAssets(task);for(const a of assets)if(a.warning)throw new Error(`${a.name}：${a.warning}`);
     if(!task.discussion){
       if(task.kind==='video')provider.validateVideo(task,this.videoAssets(task));
@@ -159,6 +230,7 @@ export class Service {
   async run(t:Task){
     let phase='准备素材';
     try{
+      if(t.cutoutRepair?.contextVersion){phase='分析角色与补画区域';await prepareContextRepair(this,t);}
       const list=this.taskAssets(t);const docs=list.filter(a=>a.type==='document').map(a=>`\n文档 ${a.name}：\n${a.text||''}`).join('');
       let prompt=(t.imageEdit?t.effectivePrompt||t.prompt:t.prompt)+docs;
       if(t.discussion||t.settings.optimize||t.kind==='image'&&list.some(a=>a.type==='video')){
@@ -180,15 +252,30 @@ export class Service {
         phase='OpenAI 图片生成';
         let edit:{source:Buffer;mask?:Buffer}|undefined;
         if(t.imageEdit)edit={source:await this.assets.normalizedPNG(this.imageAsset(t.imageEdit.sourceAssetId)),mask:t.imageEdit.maskFile?readFileSync(join(this.assets.directory,t.imageEdit.maskFile)):undefined};
+        if(t.cutoutRepair?.contextVersion)guardRepair(this,t);
         let bytes:Buffer=await provider.generateImage(t,list,a=>this.assets.bytes(a),this.key('openai'),edit);
         if(edit&&t.imageEdit){const size=readPNG(edit.source);bytes=await this.assets.resizePNG(bytes,size.width,size.height,t.id);if(edit.mask)bytes=compositeSelection(edit.source,bytes,edit.mask);else if(t.imageEdit.operation==='remove_background'&&!hasTransparency(bytes))throw new Error('API 返回的图片没有透明背景，请检查模型能力或调整要求后重试。');}
-        this.update(t,{state:'saving'});const a=await this.assets.import('生成图片.png',bytes,t.id);if(t.imageEdit){a.sourceAssetId=t.imageEdit.sourceAssetId;a.imageAction=t.imageEdit.operation;}this.finishAsset(t,a);
+        if(t.cutoutRepair&&!hasTransparency(bytes))throw Error('补画结果没有透明背景，请调整要求后重新生成。');
+        if(this.closed)return;
+        writeFileSync(join(this.assets.directory,`${t.id}-pending.png`),bytes);
+        this.update(t,{state:'saving'});await this.saveImage(t);
       }else{
         phase=`MiniMax ${minimaxAPI(t.settings.minimaxRegion).label}视频提交`;
         const remoteTaskId=await provider.createVideo(t,this.videoAssets(t),a=>media.get(a.id)!,this.key('minimax'));
         this.update(t,{remoteTaskId,state:'queued'});this.schedule(t,1000);
       }
     }catch(e){const unknown=e instanceof provider.ProviderError&&e.uncertain&&t.state==='submitting';const note=unknown?'提交结果待核实，请先查看供应商任务记录，不要重复生成。':t.kind==='video'&&t.state==='preparing'&&!t.discussion?'视频尚未提交到 MiniMax。':'';this.update(t,{state:unknown?'submission_unknown':'failed',error:`${phase}失败。${note}\n${this.error(e)}`});}
+  }
+  async saveImage(t:Task){if(this.closed||this.saving.has(t.id))return;this.saving.add(t.id);
+    try{
+      let bytes=readFileSync(join(this.assets.directory,`${t.id}-pending.png`));
+      if(t.outputResolution&&!t.imageEdit)bytes=await this.assets.fitOutput(bytes,'image',t.outputResolution);
+      if(this.closed)return;
+      const a=await this.assets.import('生成图片.png',bytes,t.id);
+      if(a.warning)throw new Error(a.warning);
+      if(t.imageEdit){a.sourceAssetId=t.imageEdit.sourceAssetId;a.imageAction=t.imageEdit.operation;}
+      this.finishAsset(t,a);rmSync(join(this.assets.directory,`${t.id}-pending.png`),{force:true});
+    }catch(e){this.update(t,{state:'save_failed',error:this.error(e)});}finally{this.saving.delete(t.id);}
   }
   finishText(t:Task,text:string){if(this.closed)return;this.workspace.messages.push({id:randomUUID(),kind:t.kind,role:'assistant',text,taskId:t.id,createdAt:Date.now()});this.update(t,{state:'succeeded'});}
   finishAsset(t:Task,a:Asset){if(this.closed)return;if(t.imageEdit){const source=this.workspace.assets.find(a=>a.id===t.imageEdit!.sourceAssetId);if(source)this.updateFrameVersion(source,a);}this.workspace.assets.push(a);if(t.kind==='image'&&this.workspace.selectedImageId===t.previewAtSubmit)this.workspace.selectedImageId=a.id;else if(t.kind==='video'&&this.workspace.selectedVideoId===t.previewAtSubmit)this.workspace.selectedVideoId=a.id;t.outputAssetIds=[a.id];this.finishText(t,'生成完成，素材已保存到本地。');}
@@ -212,10 +299,13 @@ export class Service {
     const response=await fetchHTTP(u,{signal:AbortSignal.any([this.lifecycle.signal,AbortSignal.timeout(120000)])});if(!response.ok)throw new Error(`下载失败 (${response.status})`);
     const limit=200*1024*1024;const reader=response.body?.getReader();if(!reader)throw new Error('下载没有内容。');let total=0;const chunks:Uint8Array[]=[];
     while(true){const {done,value}=await reader.read();if(done)break;total+=value.length;if(total>limit){await reader.cancel();throw new Error('视频结果超过 200 MB。');}chunks.push(value);}
-    const b=Buffer.concat(chunks);const a=await this.assets.import('生成视频.mp4',b,t.id);if(a.warning)throw new Error(a.warning);this.finishAsset(t,a);if(t.autoFrameCount){try{await this.splitVideo({assetId:a.id,count:t.autoFrameCount,requestId:'auto-'+t.id});}catch{/* The video remains saved; frame extraction can be retried locally. */}}
+    if(this.closed)return;
+    let b=Buffer.concat(chunks);if(t.outputResolution)b=await this.assets.fitOutput(b,'video',t.outputResolution);
+    if(this.closed)return;
+    const a=await this.assets.import('生成视频.mp4',b,t.id);if(a.warning)throw new Error(a.warning);this.finishAsset(t,a);if(t.autoFrameCount){try{await this.splitVideo({assetId:a.id,count:t.autoFrameCount,requestId:'auto-'+t.id});}catch{/* The video remains saved; frame extraction can be retried locally. */}}
   }catch(e){this.update(t,{state:'save_failed',error:this.error(e)});}finally{this.saving.delete(t.id);}}
-  async retryTask(id:string){this.assertAI();const t=this.workspace.tasks.find(t=>t.id===id);if(!t)throw new Error('任务不存在。');if(t.state==='save_failed'&&t.resultUrl){this.update(t,{state:'saving',error:undefined});await this.saveVideo(t);}else if(t.remoteTaskId&&['queued','running','saving'].includes(t.state)){this.schedule(t,0);}else throw new Error('此任务不能安全地自动重试；请查看错误后主动重新发送。');}
-  resume(){if(this.workspace.workbenchType==='motion-editor')return;for(const t of this.workspace.tasks){if(!isBusy(t))continue;if(t.remoteTaskId){this.update(t,{state:'queued'});this.schedule(t,1000);}else this.update(t,{state:t.state==='submitting'?'submission_unknown':'failed',error:'应用在任务期间退出。未自动重新提交，请核实生成结果。'});}}
-  error(e:unknown){let m=e instanceof Error?e.message:'发生未知错误。';for(const p of ['openai','anthropic','minimax'] as Provider[]){const k=this.vault.get(p);if(k)m=m.split(k).join('[已隐藏]');}return m.slice(0,1500);}
-  close(cancelTasks=false){if(cancelTasks&&!this.closed){for(const task of this.workspace.tasks)if(isBusy(task)||task.state==='submission_unknown'){task.state='cancelled';task.error='因删除 Worktree 停止本地处理；已提交的远程生成可能继续运行或计费。';task.updatedAt=Date.now();}const pose=this.workspace.poseWorkspace?.analysis;if(pose?.status==='analyzing'){pose.status='failed';pose.error='因删除 Worktree 取消。';}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='因删除 Worktree 取消。';}const motion=this.workspace.motionWorkspace?.extraction;if(motion?.status==='extracting'){motion.status='cancelled';motion.error='因删除 Worktree 取消。';}this.store.save(this.workspace);}this.closed=true;this.lifecycle.abort();this.assets.close();for(const stop of this.modelFileJobs)stop();this.modelFileJobs.clear();this.modelVideo.close();for(const timer of this.timers.values())clearTimeout(timer);this.timers.clear();}
+  async retryTask(id:string){this.assertAI();const t=this.workspace.tasks.find(t=>t.id===id);if(!t)throw new Error('任务不存在。');if(t.state==='save_failed'&&t.kind==='image'&&existsSync(join(this.assets.directory,`${t.id}-pending.png`))){this.update(t,{state:'saving',error:undefined});await this.saveImage(t);}else if(t.state==='save_failed'&&t.resultUrl){this.update(t,{state:'saving',error:undefined});await this.saveVideo(t);}else if(t.remoteTaskId&&['queued','running','saving'].includes(t.state)){this.schedule(t,0);}else throw new Error('此任务不能安全地自动重试；请查看错误后主动重新发送。');}
+  resume(){this.tripo.resume();if(this.workspace.workbenchType==='motion-editor')return;for(const t of this.workspace.tasks){if(!isBusy(t))continue;if(t.kind==='image'&&existsSync(join(this.assets.directory,`${t.id}-pending.png`))){this.update(t,{state:'save_failed',error:'图片已生成，点击重试保存以继续本地尺寸适配。'});}else if(t.remoteTaskId){this.update(t,{state:'queued'});this.schedule(t,1000);}else this.update(t,{state:t.state==='submitting'?'submission_unknown':'failed',error:'应用在任务期间退出。未自动重新提交，请核实生成结果。'});}}
+  error(e:unknown){let m=e instanceof Error?e.message:'发生未知错误。';for(const p of ['openai','anthropic','minimax','tripo'] as Provider[]){const k=this.vault.get(p);if(k)m=m.split(k).join('[已隐藏]');}return m.slice(0,1500);}
+  close(cancelTasks=false){this.tripo.close(cancelTasks);if(cancelTasks&&!this.closed){for(const task of this.workspace.tasks)if(isBusy(task)||task.state==='submission_unknown'){task.state='cancelled';task.error='因删除 Worktree 停止本地处理；已提交的远程生成可能继续运行或计费。';task.updatedAt=Date.now();}const pose=this.workspace.poseWorkspace?.analysis;if(pose?.status==='analyzing'){pose.status='failed';pose.error='因删除 Worktree 取消。';}for(const seq of this.workspace.frameWorkspace?.sequences||[])if(seq.status==='extracting'){seq.status='failed';seq.error='因删除 Worktree 取消。';}const motion=this.workspace.motionWorkspace?.extraction;if(motion?.status==='extracting'){motion.status='cancelled';motion.error='因删除 Worktree 取消。';}this.store.save(this.workspace);}this.closed=true;this.lifecycle.abort();this.assets.close();for(const stop of this.modelFileJobs)stop();this.modelFileJobs.clear();this.modelVideo.close();for(const timer of this.timers.values())clearTimeout(timer);this.timers.clear();}
 }
